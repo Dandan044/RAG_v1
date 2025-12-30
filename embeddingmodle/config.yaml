@@ -1,0 +1,3 @@
+EMBEDDING_MODEL_NAME: "/nfs01/models/Qwen3-Embedding-8B"
+EMBEDDING_API_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJFbWJlZGRpbmcwMiJ9.sgvm4w_zpLD5Zq980JlniIekFJNznfQReG1pXs-v04k"
+EMBEDDING_BASE_URL: "http://api-lightai-qa.acclgtm.intranet.local/runai-qwen3-embedding-8b-v2/v1"
