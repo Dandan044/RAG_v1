@@ -6,6 +6,7 @@ import ReactMarkdown from 'react-markdown';
 import { motion, AnimatePresence } from 'framer-motion';
 import ExpertCard from '@/components/ExpertCard';
 import DebugDashboard from '@/components/DebugDashboard';
+import { StoryStateDashboard } from '@/components/StoryStateDashboard';
 
 const NovelWorkshopPage: React.FC = () => {
   const navigate = useNavigate();
@@ -13,6 +14,7 @@ const NovelWorkshopPage: React.FC = () => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [isDraftsCollapsed, setIsDraftsCollapsed] = useState(true);
   const [isDebugOpen, setIsDebugOpen] = useState(false);
+  const [isStateOpen, setIsStateOpen] = useState(false);
 
   useEffect(() => {
     if (!novelSession) {
@@ -112,6 +114,14 @@ const NovelWorkshopPage: React.FC = () => {
                 title="系统状态监控"
              >
                 <Activity className="w-5 h-5" />
+             </button>
+
+             <button
+                onClick={() => setIsStateOpen(true)}
+                className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-emerald-400 transition-colors"
+                title="故事状态"
+             >
+                <Brain className="w-5 h-5" />
              </button>
 
              <button

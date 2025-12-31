@@ -8,7 +8,7 @@ interface StoryStateDashboardProps {
     onClose: () => void;
 }
 
-const StoryStateDashboard: React.FC<StoryStateDashboardProps> = ({ isOpen, onClose }) => {
+export const StoryStateDashboard: React.FC<StoryStateDashboardProps> = ({ isOpen, onClose }) => {
     const { novelSession } = useDiscussionStore();
     const [activeTab, setActiveTab] = useState<'characters' | 'tasks'>('characters');
 

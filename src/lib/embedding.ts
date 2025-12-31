@@ -1,9 +1,11 @@
 import axios from 'axios';
 
 const EMBEDDING_CONFIG = {
-  baseURL: "http://api-lightai-qa.acclgtm.intranet.local/runai-qwen3-embedding-8b-v2/v1",
-  apiKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJFbWJlZGRpbmcwMiJ9.sgvm4w_zpLD5Zq980JlniIekFJNznfQReG1pXs-v04k",
-  model: "/nfs01/models/Qwen3-Embedding-8B"
+  baseURL: "https://api.siliconflow.cn/v1",
+  apiKey: "sk-hhqbvbwvlwoalronwbdgtbemvgrdftmlfauiateivbpsqoxz",
+  model: "BAAI/bge-m3",
+  dimensions: 1024,
+  encoding_format: "float"
 };
 
 export const getEmbeddings = async (texts: string[]): Promise<number[][]> => {
@@ -11,8 +13,10 @@ export const getEmbeddings = async (texts: string[]): Promise<number[][]> => {
     const response = await axios.post(
       `${EMBEDDING_CONFIG.baseURL}/embeddings`,
       {
+        model: EMBEDDING_CONFIG.model,
         input: texts,
-        model: EMBEDDING_CONFIG.model
+        encoding_format: EMBEDDING_CONFIG.encoding_format,
+        dimensions: EMBEDDING_CONFIG.dimensions // Optional but recommended by user prompt
       },
       {
         headers: {

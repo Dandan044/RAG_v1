@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import { DiscussionSession, DiscussionSettings, Expert, DiscussionMessage, NovelSession, NovelDraft, ExpertCritique, ModeratorSummary, WorkflowPhase } from '@/types';
 import { generateExperts, generateExpertResponse, generateConclusion, generateExpertSuggestions, generateNovelSegment, generateExpertCritique, generateCritiqueSummary, rewriteNovel, summarizeStory, generateWorldview, generateOutlineContribution, generateOutlineSummary } from '@/api/deepseek';
+import { analyzeCharacters, analyzeTasks } from '@/api/analyzers';
 import { memoryStore } from '@/lib/vectorStore';
 
 interface DiscussionState {
