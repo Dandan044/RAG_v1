@@ -1,20 +1,48 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDiscussionStore } from '@/store/useDiscussionStore';
-import { ArrowLeft, Edit3, MessageSquare, FileText, CheckCircle, RefreshCw, User, Brain, Activity, LayoutTemplate } from 'lucide-react';
+import { ArrowLeft, Edit3, MessageSquare, FileText, CheckCircle, RefreshCw, Brain, Activity, LayoutTemplate } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { motion, AnimatePresence } from 'framer-motion';
 import ExpertCard from '@/components/ExpertCard';
 import DebugDashboard from '@/components/DebugDashboard';
 import { StoryStateDashboard } from '@/components/StoryStateDashboard';
 
 const NovelWorkshopPage: React.FC = () => {
   const navigate = useNavigate();
-  const { novelSession, startNovelWorkflow, stopNovel, isGenerating, currentSpeakerId } = useDiscussionStore();
+  const { novelSession, startNovelWorkflow, stopNovel, isGenerating, currentSpeakerId, submitOption } = useDiscussionStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [isDraftsCollapsed, setIsDraftsCollapsed] = useState(true);
   const [isDebugOpen, setIsDebugOpen] = useState(false);
   const [isStateOpen, setIsStateOpen] = useState(false);
+  const [timeLeft, setTimeLeft] = useState(60);
+  const [customOption, setCustomOption] = useState('');
+
+  // Timer Logic for Selection Phase
+  useEffect(() => {
+    if (novelSession?.status === 'selecting_option') {
+        setTimeLeft(60);
+        const timer = setInterval(() => {
+            setTimeLeft((prev) => {
+                if (prev <= 1) {
+                    clearInterval(timer);
+                    // Random selection if time runs out
+                    const options = novelSession.currentOptions || [];
+                    if (options.length > 0) {
+                        const randomChoice = options[Math.floor(Math.random() * options.length)];
+                        submitOption(randomChoice);
+                    } else {
+                         submitOption("继续观察"); // Fallback
+                    }
+                    return 0;
+                }
+                return prev - 1;
+            });
+        }, 1000);
+        return () => clearInterval(timer);
+    } else {
+        setCustomOption(''); // Reset input
+    }
+  }, [novelSession?.status, novelSession?.currentOptions, submitOption]);
 
   useEffect(() => {
     if (!novelSession) {
@@ -28,16 +56,20 @@ const NovelWorkshopPage: React.FC = () => {
   }, [novelSession, navigate, startNovelWorkflow]);
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [novelSession?.drafts, novelSession?.critiques]);
+    scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [novelSession?.drafts, novelSession?.critiques, novelSession?.outlineDiscussions]);
 
   if (!novelSession) return null;
 
   const currentDraft = novelSession.drafts[novelSession.drafts.length - 1];
   const currentCritiques = novelSession.critiques.filter(c => c.round === novelSession.currentRound);
   const currentSummary = novelSession.summaries.find(s => s.round === novelSession.currentRound);
+
+  // Helper to determine what to show in the "Final Story" view
+  // If revising, we append the streaming revision draft to the compiled story for a seamless effect.
+  const isRevising = novelSession.status === 'revising';
+  const streamingContent = isRevising && currentDraft && currentDraft.round === novelSession.currentRound ? currentDraft.content : '';
+  const displayedStory = novelSession.compiledStory + (streamingContent ? '\n\n' + streamingContent : '');
 
   // Prepare data for ExpertsCircle
   const allParticipants = novelSession.moderator 
@@ -139,136 +171,211 @@ const NovelWorkshopPage: React.FC = () => {
       <StoryStateDashboard isOpen={isStateOpen} onClose={() => setIsStateOpen(false)} />
 
       {/* Main Layout */}
-      <main className="flex-1 flex overflow-hidden">
+      <main className="flex-1 flex overflow-hidden relative">
         
         {/* Left Panel: Novel Content or Outline Discussion */}
         <div className="flex-1 flex flex-col border-r border-slate-800 bg-slate-900/50 relative">
-          
-          {/* 0. Outline Discussion Overlay/Mode */}
-          {novelSession.status === 'outline_discussion' ? (
-              <div className="flex-1 flex flex-col h-full bg-slate-950">
-                  <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/80 sticky top-0 z-10">
-                      <h2 className="font-semibold text-slate-200 flex items-center gap-2">
-                          <LayoutTemplate className="w-4 h-4 text-pink-400" />
-                          剧情大纲研讨会 (第 {novelSession.currentRound} - {novelSession.currentRound + 4} 轮)
-                      </h2>
-                      <span className="text-xs text-slate-500 animate-pulse">专家团正在实时规划...</span>
+
+          {/* 1. Final Story Section (Fixed Top) */}
+          <div className="flex-1 flex flex-col min-h-0 border-b border-slate-800">
+              <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/80 sticky top-0 z-10">
+              <h2 className="font-semibold text-slate-200 flex items-center gap-2">
+                  <FileText className="w-4 h-4 text-emerald-400" />
+                  定稿 (已完成章节)
+              </h2>
+              </div>
+              <div className="flex-1 overflow-y-auto p-8 font-serif leading-relaxed text-lg text-slate-300 space-y-6 scroll-smooth">
+              {displayedStory ? (
+                  <div className="prose prose-invert max-w-none pb-20">
+                      <ReactMarkdown>{displayedStory}</ReactMarkdown>
+                      {isRevising && (
+                         <span className="inline-block w-2 h-5 bg-emerald-500 ml-1 animate-pulse align-middle" />
+                      )}
                   </div>
-                  <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                      {novelSession.outlineDiscussions.map((msg) => {
-                          const expert = novelSession.experts.find(e => e.id === msg.expertId);
-                          return (
-                              <div key={msg.id} className="flex gap-4 max-w-3xl">
-                                  <img 
-                                    src={expert?.avatar} 
-                                    className="w-10 h-10 rounded-full bg-slate-800 border border-slate-700 flex-shrink-0"
-                                    alt={expert?.name}
-                                  />
-                                  <div className="flex-1">
-                                      <div className="flex items-baseline gap-2 mb-1">
-                                          <span className="font-medium text-slate-200">{expert?.name}</span>
-                                          <span className="text-xs text-slate-500">{expert?.field}</span>
-                                      </div>
-                                      <div className="p-4 rounded-xl rounded-tl-none bg-slate-800/50 border border-slate-700 text-slate-300">
-                                          <ReactMarkdown>{msg.content}</ReactMarkdown>
-                                          {msg.thinking && (
-                                              <div className="mt-2 pt-2 border-t border-slate-700/50 text-xs text-slate-500 italic">
-                                                  Thinking: {msg.thinking.slice(0, 100)}...
-                                              </div>
-                                          )}
-                                      </div>
-                                  </div>
-                              </div>
-                          );
-                      })}
-                      <div ref={scrollRef} />
+              ) : (
+                  <div className="flex flex-col items-center justify-center h-full text-slate-500 italic">
+                      <span>暂无定稿内容，正在创作第一章...</span>
+                  </div>
+              )}
+              
+              {/* Inline Selection UI */}
+              {novelSession.status === 'selecting_option' && (
+                  <div className="mt-8 p-6 bg-slate-900/80 border border-slate-700 rounded-2xl shadow-xl animate-in fade-in slide-in-from-bottom-4">
+                        <div className="flex items-center justify-between mb-6">
+                            <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                                <Activity className="w-5 h-5 text-emerald-400" />
+                                做出你的选择
+                            </h2>
+                            <div className="text-slate-400 text-sm font-mono bg-slate-800 px-3 py-1 rounded-full border border-slate-700">
+                                剩余时间: <span className={`${timeLeft <= 5 ? 'text-red-400' : 'text-emerald-400'} font-bold`}>{timeLeft}s</span>
+                            </div>
+                        </div>
+                        
+                        <div className="grid gap-3 mb-4">
+                            {novelSession.currentOptions?.map((opt, idx) => (
+                                <button
+                                    key={idx}
+                                    onClick={() => submitOption(opt)}
+                                    className="p-4 bg-slate-800/50 hover:bg-emerald-600/20 border border-slate-700 hover:border-emerald-500 rounded-xl text-left transition-all group flex items-start gap-3"
+                                >
+                                    <span className="flex-shrink-0 w-6 h-6 rounded-full bg-slate-700 text-slate-300 flex items-center justify-center text-xs group-hover:bg-emerald-500 group-hover:text-white mt-0.5">
+                                        {idx + 1}
+                                    </span>
+                                    <span className="text-slate-200 group-hover:text-white leading-relaxed">{opt}</span>
+                                </button>
+                            ))}
+                        </div>
+
+                        <div className="relative pt-2 border-t border-slate-800/50 mt-4">
+                            <input 
+                                type="text"
+                                value={customOption}
+                                onChange={(e) => setCustomOption(e.target.value)}
+                                placeholder="或者... 输入你自己的想法"
+                                className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 pr-20 text-sm text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 placeholder:text-slate-600"
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' && customOption.trim()) {
+                                        submitOption(customOption.trim());
+                                    }
+                                }}
+                                autoFocus
+                            />
+                            <button
+                                onClick={() => {
+                                    if (customOption.trim()) submitOption(customOption.trim());
+                                }}
+                                disabled={!customOption.trim()}
+                                className="absolute right-1.5 top-3.5 bottom-1.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            >
+                                确认
+                            </button>
+                        </div>
+                  </div>
+              )}
+              <div ref={scrollRef} />
+              </div>
+          </div>
+
+          {/* 2. Drafts / Outline Discussion Section (Collapsible Bottom) */}
+          <div className="flex-shrink-0 bg-slate-900/30 border-t border-slate-800 transition-all duration-300 ease-in-out flex flex-col"
+              style={{ height: isDraftsCollapsed ? '48px' : '40%' }}>
+              
+              <button 
+              onClick={() => setIsDraftsCollapsed(!isDraftsCollapsed)}
+              className="w-full p-3 flex items-center justify-between bg-slate-900/80 hover:bg-slate-800 transition-colors border-b border-slate-800/50 cursor-pointer"
+              >
+              <div className="flex items-center gap-3">
+                  <div className={`p-1.5 rounded-lg ${
+                      isDraftsCollapsed ? 'bg-slate-800' :
+                      novelSession.status === 'outline_discussion' ? 'bg-pink-500/20 text-pink-400' : 'bg-emerald-500/20 text-emerald-400'
+                  }`}>
+                  {novelSession.status === 'outline_discussion' ? (
+                      <LayoutTemplate className="w-4 h-4" />
+                  ) : (
+                      <Edit3 className="w-4 h-4" />
+                  )}
+                  </div>
+                  <div className="flex flex-col items-start">
+                  <span className="text-sm font-medium text-slate-300">
+                      {novelSession.status === 'outline_discussion' ? '剧情大纲研讨会' : '本轮初稿与迭代'}
+                  </span>
+                  <span className="text-[10px] text-slate-500">
+                      {novelSession.status === 'outline_discussion'
+                          ? `第 ${novelSession.currentRound} - ${novelSession.currentRound + 4} 轮 • ${novelSession.outlineDiscussions.length} 条发言`
+                          : `第 ${novelSession.currentRound} 轮 • ${novelSession.drafts.filter(d => d.round === novelSession.currentRound).length} 个版本`
+                      }
+                  </span>
                   </div>
               </div>
-          ) : (
-             <>
-                {/* 1. Final Story Section (Fixed Top) */}
-                <div className="flex-1 flex flex-col min-h-0 border-b border-slate-800">
-                    <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/80 sticky top-0 z-10">
-                    <h2 className="font-semibold text-slate-200 flex items-center gap-2">
-                        <FileText className="w-4 h-4 text-emerald-400" />
-                        定稿 (已完成章节)
-                    </h2>
-                    </div>
-                    <div className="flex-1 overflow-y-auto p-8 font-serif leading-relaxed text-lg text-slate-300 space-y-6">
-                    {novelSession.compiledStory ? (
-                        <div className="prose prose-invert max-w-none">
-                            <ReactMarkdown>{novelSession.compiledStory}</ReactMarkdown>
-                        </div>
-                    ) : (
-                        <div className="flex flex-col items-center justify-center h-full text-slate-500 italic">
-                            <span>暂无定稿内容，正在创作第一章...</span>
-                        </div>
-                    )}
-                    </div>
-                </div>
+              
+              <div className="flex items-center gap-3">
+                  {isGenerating && (novelSession.status === 'drafting' || novelSession.status === 'revising' || novelSession.status === 'outline_discussion') && (
+                  <div className={`flex items-center gap-2 text-xs animate-pulse mr-2 ${
+                      novelSession.status === 'outline_discussion' ? 'text-pink-400' : 'text-emerald-400'
+                  }`}>
+                      <span className="relative flex h-2 w-2">
+                      <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                          novelSession.status === 'outline_discussion' ? 'bg-pink-400' : 'bg-emerald-400'
+                      }`}></span>
+                      <span className={`relative inline-flex rounded-full h-2 w-2 ${
+                          novelSession.status === 'outline_discussion' ? 'bg-pink-500' : 'bg-emerald-500'
+                      }`}></span>
+                      </span>
+                      {novelSession.status === 'outline_discussion' ? '正在研讨...' : '正在撰写...'}
+                  </div>
+                  )}
+                  <div className={`transition-transform duration-300 ${isDraftsCollapsed ? 'rotate-0' : 'rotate-180'}`}>
+                      <ArrowLeft className="w-4 h-4 text-slate-500 rotate-90" />
+                  </div>
+              </div>
+              </button>
 
-                {/* 2. Drafts Section (Collapsible Bottom) */}
-                <div className="flex-shrink-0 bg-slate-900/30 border-t border-slate-800 transition-all duration-300 ease-in-out flex flex-col"
-                    style={{ height: isDraftsCollapsed ? '48px' : '40%' }}>
-                    
-                    <button 
-                    onClick={() => setIsDraftsCollapsed(!isDraftsCollapsed)}
-                    className="w-full p-3 flex items-center justify-between bg-slate-900/80 hover:bg-slate-800 transition-colors border-b border-slate-800/50 cursor-pointer"
-                    >
-                    <div className="flex items-center gap-3">
-                        <div className={`p-1.5 rounded-lg ${isDraftsCollapsed ? 'bg-slate-800' : 'bg-emerald-500/20 text-emerald-400'}`}>
-                        <Edit3 className="w-4 h-4" />
-                        </div>
-                        <div className="flex flex-col items-start">
-                        <span className="text-sm font-medium text-slate-300">本轮初稿与迭代</span>
-                        <span className="text-[10px] text-slate-500">
-                            第 {novelSession.currentRound} 轮 • {novelSession.drafts.filter(d => d.round === novelSession.currentRound).length} 个版本
-                        </span>
-                        </div>
-                    </div>
-                    
-                    <div className="flex items-center gap-3">
-                        {isGenerating && (novelSession.status === 'drafting' || novelSession.status === 'revising') && (
-                        <div className="flex items-center gap-2 text-xs text-emerald-400 animate-pulse mr-2">
-                            <span className="relative flex h-2 w-2">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                            </span>
-                            正在撰写...
-                        </div>
-                        )}
-                        <div className={`transition-transform duration-300 ${isDraftsCollapsed ? 'rotate-0' : 'rotate-180'}`}>
-                            <ArrowLeft className="w-4 h-4 text-slate-500 rotate-90" />
-                        </div>
-                    </div>
-                    </button>
+              <div className="flex-1 overflow-y-auto p-6 bg-slate-950/30">
+              {novelSession.status === 'outline_discussion' ? (
+                  <div className="space-y-6">
+                      {novelSession.outlineDiscussions.length === 0 ? (
+                          <div className="flex flex-col items-center justify-center h-full text-slate-500 italic">
+                              <span>专家团正在进入研讨...</span>
+                          </div>
+                      ) : (
+                          novelSession.outlineDiscussions.map((msg) => {
+                              const expert = novelSession.experts.find(e => e.id === msg.expertId);
+                              return (
+                                  <div key={msg.id} className="flex gap-4 max-w-3xl">
+                                      <img 
+                                        src={expert?.avatar} 
+                                        className="w-10 h-10 rounded-full bg-slate-800 border border-slate-700 flex-shrink-0"
+                                        alt={expert?.name}
+                                      />
+                                      <div className="flex-1">
+                                          <div className="flex items-baseline gap-2 mb-1">
+                                              <span className="font-medium text-slate-200">{expert?.name}</span>
+                                              <span className="text-xs text-slate-500">{expert?.field}</span>
+                                          </div>
+                                          <div className="p-4 rounded-xl rounded-tl-none bg-slate-800/50 border border-slate-700 text-slate-300">
+                                              <ReactMarkdown>{msg.content}</ReactMarkdown>
+                                          </div>
+                                      </div>
+                                  </div>
+                              );
+                          })
+                      )}
+                      <div ref={scrollRef} />
+                  </div>
+              ) : (
+                  <div className="space-y-8">
+                      {novelSession.drafts.filter(d => d.round === novelSession.currentRound).map((draft, index) => {
+                          // Hide the revision draft from bottom panel if we are revising, 
+                          // because it is now shown in the top panel.
+                          // Draft index 0 is the initial draft. Index 1+ are revisions.
+                          // If status is revising, the last draft is the active one.
+                          if (novelSession.status === 'revising' && index === novelSession.drafts.filter(d => d.round === novelSession.currentRound).length - 1) {
+                              return null;
+                          }
 
-                    <div className="flex-1 overflow-y-auto p-6 bg-slate-950/30">
-                    <div className="space-y-8">
-                        {novelSession.drafts.filter(d => d.round === novelSession.currentRound).map((draft, index) => (
-                            <div key={draft.createdAt} className="group">
-                                <div className="flex items-center gap-2 mb-3 text-xs text-slate-500 uppercase tracking-wider font-sans">
-                                    <span className="bg-slate-800 px-2 py-1 rounded text-slate-400 border border-slate-700">
-                                    v{draft.version}
-                                    </span>
-                                    <span>{index === 0 ? '初始草稿' : '修订版本'}</span>
-                                    <span className="text-slate-600">•</span>
-                                    <span>{new Date(draft.createdAt).toLocaleTimeString()}</span>
-                                </div>
-                                <div className="prose prose-invert prose-sm max-w-none p-4 rounded-xl border border-slate-800 bg-slate-900/50 group-hover:border-slate-700 transition-colors">
-                                    <ReactMarkdown>{draft.content}</ReactMarkdown>
-                                    {/* Cursor for active draft */}
-                                    {isGenerating && draft === currentDraft && (
-                                        <span className="inline-block w-1.5 h-4 bg-emerald-500 ml-1 animate-pulse align-middle" />
-                                    )}
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                    </div>
-                </div>
-             </>
-          )}
+                          return (
+                          <div key={draft.createdAt} className="group">
+                              <div className="flex items-center gap-2 mb-3 text-xs text-slate-500 uppercase tracking-wider font-sans">
+                                  <span className="bg-slate-800 px-2 py-1 rounded text-slate-400 border border-slate-700">
+                                  v{draft.version}
+                                  </span>
+                                  <span>{index === 0 ? '初始草稿' : '修订版本'}</span>
+                                  <span className="text-slate-600">•</span>
+                                  <span>{new Date(draft.createdAt).toLocaleTimeString()}</span>
+                              </div>
+                              <div className="prose prose-invert prose-sm max-w-none p-4 rounded-xl border border-slate-800 bg-slate-900/50 group-hover:border-slate-700 transition-colors">
+                                  <ReactMarkdown>{draft.content}</ReactMarkdown>
+                                  {isGenerating && draft === currentDraft && (
+                                      <span className="inline-block w-1.5 h-4 bg-emerald-500 ml-1 animate-pulse align-middle" />
+                                  )}
+                              </div>
+                          </div>
+                      )})}
+                      <div ref={scrollRef} />
+                  </div>
+              )}
+              </div>
+          </div>
 
         </div>
 

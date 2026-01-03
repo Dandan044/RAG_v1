@@ -7,22 +7,22 @@ interface LoadingOverlayProps {
   topic: string;
 }
 
+const STEPS = [
+  { icon: BrainCircuit, text: "正在分析讨论话题...", color: "text-blue-400" },
+  { icon: Server, text: "正在连接 DeepSeek V3.2...", color: "text-purple-400" },
+  { icon: Users, text: "正在寻找合适的专家...", color: "text-green-400" },
+  { icon: Sparkles, text: "正在生成专家人设...", color: "text-amber-400" },
+  { icon: BrainCircuit, text: "正在准备圆桌会议...", color: "text-pink-400" }
+];
+
 const LoadingOverlay: React.FC<LoadingOverlayProps> = ({ isLoading, topic }) => {
   const [step, setStep] = useState(0);
-
-  const steps = [
-    { icon: BrainCircuit, text: "正在分析讨论话题...", color: "text-blue-400" },
-    { icon: Server, text: "正在连接 DeepSeek V3.2...", color: "text-purple-400" },
-    { icon: Users, text: "正在寻找合适的专家...", color: "text-green-400" },
-    { icon: Sparkles, text: "正在生成专家人设...", color: "text-amber-400" },
-    { icon: BrainCircuit, text: "正在准备圆桌会议...", color: "text-pink-400" }
-  ];
 
   useEffect(() => {
     if (isLoading) {
       setStep(0);
       const interval = setInterval(() => {
-        setStep(prev => (prev < steps.length - 1 ? prev + 1 : prev));
+        setStep(prev => (prev < STEPS.length - 1 ? prev + 1 : prev));
       }, 1500); // Change step every 1.5 seconds
 
       return () => clearInterval(interval);
@@ -57,8 +57,8 @@ const LoadingOverlay: React.FC<LoadingOverlayProps> = ({ isLoading, topic }) => 
                 />
                 <div className="absolute inset-0 flex items-center justify-center">
                    {/* Dynamically change the center icon based on current step */}
-                   {React.createElement(steps[step].icon, { 
-                     className: `w-8 h-8 ${steps[step].color} animate-pulse` 
+                   {React.createElement(STEPS[step].icon, { 
+                     className: `w-8 h-8 ${STEPS[step].color} animate-pulse` 
                    })}
                 </div>
               </div>
@@ -72,7 +72,7 @@ const LoadingOverlay: React.FC<LoadingOverlayProps> = ({ isLoading, topic }) => 
                   exit={{ opacity: 0, y: -10 }}
                   className="text-2xl font-bold text-white"
                 >
-                  {steps[step].text}
+                  {STEPS[step].text}
                 </motion.h3>
                 <p className="text-slate-400 text-sm max-w-xs mx-auto truncate px-4">
                   "{topic}"
@@ -84,7 +84,7 @@ const LoadingOverlay: React.FC<LoadingOverlayProps> = ({ isLoading, topic }) => 
                 <motion.div
                   className="h-full bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500"
                   initial={{ width: "0%" }}
-                  animate={{ width: `${((step + 1) / steps.length) * 100}%` }}
+                  animate={{ width: `${((step + 1) / STEPS.length) * 100}%` }}
                   transition={{ duration: 0.5 }}
                 />
               </div>

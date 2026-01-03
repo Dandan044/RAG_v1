@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { X, Settings, RotateCcw, Save, Activity, CheckCircle, AlertCircle } from 'lucide-react';
-import { useAgentConfigStore, AgentType, DEFAULT_CONFIGS } from '@/store/agentConfigStore';
+import { useAgentConfigStore, AgentType } from '@/store/agentConfigStore';
 import { deepseekClient } from '@/lib/axios';
-import { getEmbeddings } from '@/lib/embedding';
+import { getEmbeddings, rerankDocuments } from '@/lib/embedding';
+import type { AxiosError } from 'axios';
 
 interface AgentConfigDashboardProps {
     isOpen: boolean;
@@ -17,6 +18,7 @@ const AGENT_LABELS: Record<AgentType, string> = {
     story_summarizer: '故事摘要师 (System)',
     novel_writer: '小说作家 (Writer)',
     expert_critique: '专家评审 (Expert)',
+    option_generator: '选项生成器 (System)',
     critique_summarizer: '评审总结 (Moderator)',
     novel_rewriter: '小说修订 (Writer)',
     outline_contributor: '大纲贡献 (Expert)',
@@ -45,7 +47,7 @@ const AgentConfigDashboard: React.FC<AgentConfigDashboardProps> = ({ isOpen, onC
     const runSystemTest = async () => {
         setTestStatus('testing');
         setTestResult('正在测试所有 API 服务...');
-        let logs: string[] = [];
+        const logs: string[] = [];
 
         try {
             // 1. Test DeepSeek LLM
@@ -70,17 +72,27 @@ const AgentConfigDashboard: React.FC<AgentConfigDashboardProps> = ({ isOpen, onC
             logs.push(`✅ Embedding API 连接成功 (${Date.now() - embStart}ms)`);
             setTestResult(logs.join('\n'));
 
+            // 3. Test Rerank API
+            logs.push('⏳ 正在测试 Rerank API (SiliconFlow)...');
+            setTestResult(logs.join('\n'));
+            
+            const rerankStart = Date.now();
+            await rerankDocuments('test', ['test document']);
+            logs.push(`✅ Rerank API 连接成功 (${Date.now() - rerankStart}ms)`);
+            setTestResult(logs.join('\n'));
+
             setTestStatus('success');
             logs.push('🎉 所有服务运行正常');
             setTestResult(logs.join('\n'));
 
-        } catch (error: any) {
-            console.error('System test failed:', error);
+        } catch (error) {
+            const err = error as AxiosError;
+            console.error('System test failed:', err);
             setTestStatus('error');
-            logs.push(`❌ 测试失败: ${error.message || '未知错误'}`);
-            if (error.response) {
-                 logs.push(`   Status: ${error.response.status}`);
-                 logs.push(`   Data: ${JSON.stringify(error.response.data)}`);
+            logs.push(`❌ 测试失败: ${err.message || '未知错误'}`);
+            if (err.response) {
+                 logs.push(`   Status: ${err.response.status}`);
+                 logs.push(`   Data: ${JSON.stringify(err.response.data)}`);
             }
             setTestResult(logs.join('\n'));
         }

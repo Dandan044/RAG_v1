@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Database, Activity, RefreshCw, Layers, Sparkles, LayoutTemplate, Terminal } from 'lucide-react';
 import { memoryStore, MemorySegment } from '@/lib/vectorStore';
 import { useDiscussionStore } from '@/store/useDiscussionStore';
-import { useDebugStore, DebugLog } from '@/store/debugStore';
+import { useDebugStore } from '@/store/debugStore';
 import { estimateTokens, MAX_CONTEXT_TOKENS } from '@/utils/tokenManager';
 
 interface DebugDashboardProps {
@@ -157,7 +157,7 @@ const DebugDashboard: React.FC<DebugDashboardProps> = ({ isOpen, onClose }) => {
                     <p className="text-xs mt-1">定稿完成后会自动切片存入</p>
                   </div>
                 ) : (
-                  segments.map((seg, idx) => (
+                  segments.map((seg) => (
                     <div key={seg.id} className="p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 transition-colors group">
                       <div className="flex justify-between items-start mb-2">
                         <span className="text-xs font-mono text-blue-400 bg-blue-900/20 px-2 py-0.5 rounded border border-blue-900/30">

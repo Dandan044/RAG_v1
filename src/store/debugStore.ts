@@ -10,12 +10,12 @@ export interface DebugLog {
     systemPrompt: string;
     userPrompt: string;
     temperature?: number;
-    tools?: any[];
+    tools?: unknown[];
   };
   response: {
     content: string;
     thinking?: string;
-    toolCalls?: any[];
+    toolCalls?: unknown[];
   };
   cost?: {
     inputTokens?: number;

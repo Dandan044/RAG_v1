@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import NovelSetup from '@/components/NovelSetup';
 import { BookOpen, Settings } from 'lucide-react';
-import { useDiscussionStore } from '@/store/useDiscussionStore';
 import AgentConfigDashboard from '@/components/AgentConfigDashboard';
 
 const HomePage: React.FC = () => {

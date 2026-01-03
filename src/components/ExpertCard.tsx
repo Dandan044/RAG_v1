@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Expert } from '@/types';
 import clsx from 'clsx';
-import { Maximize2, Minimize2, Database, Brain } from 'lucide-react';
+import { Minimize2, Brain } from 'lucide-react';
 
 interface ExpertCardProps {
   expert: Expert;

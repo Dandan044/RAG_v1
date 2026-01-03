@@ -8,9 +8,34 @@ const EMBEDDING_CONFIG = {
   encoding_format: "float"
 };
 
+const RERANK_CONFIG = {
+  baseURL: "https://api.siliconflow.cn/v1",
+  apiKey: "sk-hhqbvbwvlwoalronwbdgtbemvgrdftmlfauiateivbpsqoxz",
+  model: "BAAI/bge-reranker-v2-m3"
+};
+
+type EmbeddingResponseItem = {
+  index: number;
+  embedding: number[];
+};
+
+type EmbeddingResponseData = {
+  data: EmbeddingResponseItem[];
+};
+
+type RerankResponseItem = {
+    index: number;
+    relevance_score: number;
+    document?: { text: string }; // Depending on return_documents=true
+};
+
+type RerankResponseData = {
+    results: RerankResponseItem[];
+};
+
 export const getEmbeddings = async (texts: string[]): Promise<number[][]> => {
   try {
-    const response = await axios.post(
+    const response = await axios.post<EmbeddingResponseData>(
       `${EMBEDDING_CONFIG.baseURL}/embeddings`,
       {
         model: EMBEDDING_CONFIG.model,
@@ -28,8 +53,8 @@ export const getEmbeddings = async (texts: string[]): Promise<number[][]> => {
 
     if (response.data && response.data.data) {
       // Sort by index to ensure order matches input
-      const sortedData = response.data.data.sort((a: any, b: any) => a.index - b.index);
-      return sortedData.map((item: any) => item.embedding);
+      const sortedData = response.data.data.sort((a, b) => a.index - b.index);
+      return sortedData.map((item) => item.embedding);
     }
     
     throw new Error('Invalid response format from embedding API');
@@ -37,6 +62,38 @@ export const getEmbeddings = async (texts: string[]): Promise<number[][]> => {
     console.error('Error fetching embeddings:', error);
     throw error;
   }
+};
+
+export const rerankDocuments = async (query: string, documents: string[], topN: number = 5): Promise<{ index: number; relevance_score: number }[]> => {
+    try {
+        const response = await axios.post<RerankResponseData>(
+            `${RERANK_CONFIG.baseURL}/rerank`,
+            {
+                model: RERANK_CONFIG.model,
+                query: query,
+                documents: documents,
+                top_n: topN,
+                return_documents: false, // We only need indices and scores
+                max_chunks_per_doc: 1024,
+                overlap_tokens: 80
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${RERANK_CONFIG.apiKey}`
+                }
+            }
+        );
+
+        if (response.data && response.data.results) {
+            return response.data.results;
+        }
+
+        throw new Error('Invalid response format from rerank API');
+    } catch (error) {
+        console.error('Error reranking documents:', error);
+        throw error;
+    }
 };
 
 // Utility for cosine similarity

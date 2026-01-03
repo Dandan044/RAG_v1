@@ -1,4 +1,4 @@
-import { getEmbeddings, cosineSimilarity } from './embedding';
+import { getEmbeddings, cosineSimilarity, rerankDocuments } from './embedding';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface MemorySegment {
@@ -7,8 +7,9 @@ export interface MemorySegment {
   vector: number[];
   metadata: {
     round: number;
-    type: 'narrative' | 'summary' | 'character_profile' | 'worldview' | 'outline';
+    type: 'narrative' | 'summary' | 'character_profile' | 'worldview' | 'outline' | 'story_task';
     timestamp: number;
+    entityId?: string; // For linking specific character/task ID to vector segment
   };
 }
 
@@ -28,11 +29,15 @@ class MemoryStore {
   }
 
   public async addDocument(text: string, metadata: Omit<MemorySegment['metadata'], 'timestamp'>) {
-    // Simple chunking strategy: split by paragraphs, then group if too small
-    // For now, let's treat the incoming text as a coherent chunk (e.g. a finalized chapter or segment)
-    // If it's too long, we might want to split it.
+    // If it's a character profile or task, we don't want to chunk it, we want it whole.
+    // For narrative, we might chunk.
+    let chunks: string[] = [];
     
-    const chunks = this.chunkText(text);
+    if (metadata.type === 'character_profile' || metadata.type === 'story_task') {
+        chunks = [text];
+    } else {
+        chunks = this.chunkText(text);
+    }
     
     if (chunks.length === 0) return;
 
@@ -51,27 +56,57 @@ class MemoryStore {
         });
       });
       
-      console.log(`[MemoryStore] Added ${chunks.length} segments.`);
+      console.log(`[MemoryStore] Added ${chunks.length} segments of type ${metadata.type}.`);
     } catch (error) {
       console.error('[MemoryStore] Failed to add document:', error);
     }
   }
+  
+  // Update or Replace a document for a specific entity (Character/Task)
+  public async updateEntityDocument(entityId: string, text: string, metadata: Omit<MemorySegment['metadata'], 'timestamp' | 'entityId'>) {
+      // Remove old segments for this entity
+      this.segments = this.segments.filter(s => s.metadata.entityId !== entityId);
+      
+      // Add new
+      await this.addDocument(text, { ...metadata, entityId });
+  }
 
-  public async search(query: string, limit: number = 3): Promise<{ segment: MemorySegment; score: number }[]> {
+  public getDocumentByEntityId(entityId: string): MemorySegment | undefined {
+      return this.segments.find(s => s.metadata.entityId === entityId);
+  }
+
+  public async search(query: string, limit: number = 3, useRerank: boolean = true): Promise<{ segment: MemorySegment; score: number }[]> {
     if (this.segments.length === 0) return [];
 
     try {
       const [queryVector] = await getEmbeddings([query]);
+      
+      // 1. Initial Retrieval (Cosine Similarity)
+      // Get more candidates than limit for reranking (e.g., 3x limit)
+      const candidateLimit = useRerank ? Math.max(limit * 5, 10) : limit;
       
       const results = this.segments.map(segment => ({
         segment,
         score: cosineSimilarity(queryVector, segment.vector)
       }));
 
-      // Sort by score descending
-      return results
+      const topCandidates = results
         .sort((a, b) => b.score - a.score)
-        .slice(0, limit);
+        .slice(0, candidateLimit);
+
+      if (!useRerank || topCandidates.length === 0) {
+          return topCandidates.slice(0, limit);
+      }
+
+      // 2. Reranking
+      const documents = topCandidates.map(c => c.segment.text);
+      const rerankResults = await rerankDocuments(query, documents, limit);
+      
+      // Map rerank results back to segments
+      return rerankResults.map(r => ({
+          segment: topCandidates[r.index].segment,
+          score: r.relevance_score
+      })).sort((a, b) => b.score - a.score); // Rerank results are usually sorted, but ensure it.
         
     } catch (error) {
       console.error('[MemoryStore] Search failed:', error);
@@ -133,7 +168,7 @@ class MemoryStore {
       chunks.push(currentChunk.trim());
     }
 
-    console.log(`[MemoryStore] Chunked text into ${chunks.length} parts (maxChars=${maxChars}). Samples:`, chunks.slice(0, 2));
+    // console.log(`[MemoryStore] Chunked text into ${chunks.length} parts (maxChars=${maxChars}).`);
     return chunks;
   }
 }

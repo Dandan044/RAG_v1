@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
-import { DiscussionSession, DiscussionSettings, Expert, DiscussionMessage, NovelSession, NovelDraft, ExpertCritique, ModeratorSummary, WorkflowPhase } from '@/types';
-import { generateExperts, generateExpertResponse, generateConclusion, generateExpertSuggestions, generateNovelSegment, generateExpertCritique, generateCritiqueSummary, rewriteNovel, summarizeStory, generateWorldview, generateOutlineContribution, generateOutlineSummary } from '@/api/deepseek';
+import { DiscussionSession, DiscussionSettings, Expert, DiscussionMessage, NovelSession, NovelDraft, WorkflowPhase } from '@/types';
+import { generateExperts, generateExpertResponse, generateConclusion, generateExpertSuggestions, generateNovelSegment, generateExpertCritique, generateCritiqueSummary, rewriteNovel, summarizeStory, generateWorldview, generateOutlineContribution, generateOutlineSummary, generateOptions } from '@/api/deepseek';
 import { analyzeCharacters, analyzeTasks } from '@/api/analyzers';
 import { memoryStore } from '@/lib/vectorStore';
 
@@ -32,6 +32,7 @@ interface DiscussionState {
   startNovelWorkflow: () => void;
   stopNovel: () => void;
   processNovelCycle: () => Promise<void>;
+  submitOption: (choice: string) => void;
   abortController: AbortController | null;
 }
 
@@ -286,6 +287,13 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
       updatedAt: new Date().toISOString(),
       characters: [],
       tasks: [],
+      archiveSessionId: (() => {
+          const now = new Date();
+          const pad = (n: number) => n.toString().padStart(2, '0');
+          return `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+      })(),
+      currentOptions: [],
+      choiceHistory: []
     };
     set({ novelSession: newSession, error: null });
   },
@@ -322,13 +330,13 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
     const controller = new AbortController();
     set({ abortController: controller });
 
-    // Check if we need an outline first (e.g., Round 1)
-    const isOutlineRound = (novelSession.currentRound - 1) % 5 === 0;
-    const currentOutlineRange = `第${novelSession.currentRound}-${novelSession.currentRound + 4}轮`;
-    const hasOutline = novelSession.outlines.some(o => o.range === currentOutlineRange);
+    // Check if we need an outline first
+    const isFirstRound = novelSession.currentRound === 1;
+    const hasAnyOutline = novelSession.outlines.length > 0;
+    const shouldUpdate = novelSession.shouldUpdateOutline;
 
     let initialStatus: WorkflowPhase | 'outline_discussion' = 'drafting';
-    if (isOutlineRound && !hasOutline) {
+    if ((isFirstRound && !hasAnyOutline) || shouldUpdate) {
         initialStatus = 'outline_discussion';
     }
 
@@ -351,6 +359,29 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
     }
   },
 
+  submitOption: (choice: string) => {
+    // Wrap in setTimeout to avoid updating state during render of parent components
+    // if this is triggered synchronously (though setInterval usually prevents this)
+    setTimeout(() => {
+        set(state => {
+            if (!state.novelSession) return {};
+            const nextRound = state.novelSession.currentRound + 1;
+            
+            return {
+                novelSession: {
+                    ...state.novelSession,
+                    choiceHistory: [...state.novelSession.choiceHistory, { round: state.novelSession.currentRound, choice }],
+                    currentRound: nextRound,
+                    status: 'drafting',
+                    currentRevision: 0,
+                    currentOptions: [],
+                }
+            };
+        });
+        get().processNovelCycle();
+    }, 0);
+  },
+
   processNovelCycle: async () => {
     const { novelSession, isGenerating, abortController } = get();
     // Ensure we have a valid controller if we are processing
@@ -363,16 +394,24 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
 
     if (!novelSession || isGenerating) return;
 
-    // 0. Outline Phase Check (Auto-trigger every 5 rounds)
-    const isOutlineRound = (novelSession.currentRound - 1) % 5 === 0;
+    // 0. Outline Phase Check
+    // Trigger if: Round 1 (no outline) OR Voted to update
+    const isFirstRound = novelSession.currentRound === 1;
+    const hasAnyOutline = novelSession.outlines.length > 0;
+    const shouldUpdate = novelSession.shouldUpdateOutline;
+    
+    // Define range for potential new outline
     const currentOutlineRange = `第${novelSession.currentRound}-${novelSession.currentRound + 4}轮`;
-    const hasOutline = novelSession.outlines.some(o => o.range === currentOutlineRange);
 
-    if (isOutlineRound && !hasOutline && novelSession.status !== 'outline_discussion') {
-        set({ 
-            novelSession: { ...novelSession, status: 'outline_discussion' },
+    if (((isFirstRound && !hasAnyOutline) || shouldUpdate) && novelSession.status !== 'outline_discussion') {
+        set(state => ({ 
+            novelSession: state.novelSession ? { 
+                ...state.novelSession, 
+                status: 'outline_discussion',
+                shouldUpdateOutline: false // Reset flag
+            } : null,
             isGenerating: false 
-        });
+        }));
         setTimeout(() => get().processNovelCycle(), 0);
         return;
     }
@@ -387,33 +426,45 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
             
             // 2 Rounds of Expert Discussion
             for (let r = 0; r < 2; r++) {
-                for (const expert of experts) {
-                    set({ currentSpeakerId: expert.id }); // Highlight speaker
+                // 1. Create placeholders for ALL experts in this round
+                const messageIds: Record<string, string> = {}; // map expertId to messageId
+                
+                // Batch state update for placeholders
+                set(state => {
+                    if (!state.novelSession) return {};
+                    const newMessages: DiscussionMessage[] = [];
                     
-                    // Create placeholder message
-                    const msgId = uuidv4();
-                    const newMessage: DiscussionMessage = {
-                        id: msgId,
-                        expertId: expert.id,
-                        content: '',
-                        timestamp: Date.now(),
-                        round: currentRound
-                    };
-                    
-                    set(state => ({
-                        novelSession: state.novelSession ? {
-                            ...state.novelSession,
-                            outlineDiscussions: [...state.novelSession.outlineDiscussions, newMessage]
-                        } : null
-                    }));
+                    experts.forEach(expert => {
+                        const msgId = uuidv4();
+                        messageIds[expert.id] = msgId;
+                        newMessages.push({
+                            id: msgId,
+                            expertId: expert.id,
+                            content: '',
+                            timestamp: Date.now(),
+                            round: currentRound
+                        });
+                    });
 
+                    return {
+                        novelSession: {
+                            ...state.novelSession,
+                            outlineDiscussions: [...state.novelSession.outlineDiscussions, ...newMessages]
+                        }
+                    };
+                });
+
+                // 2. Parallel execution
+                const roundResults = await Promise.all(experts.map(async (expert) => {
+                    const msgId = messageIds[expert.id];
+                    
                     const result = await generateOutlineContribution(
                         expert,
                         worldview,
                         requirements,
                         historyOutline,
                         currentRound,
-                        discussionLog, // Pass previous opinions
+                        discussionLog, // Pass logs from PREVIOUS rounds only
                         enableThinking,
                         (chunk, type) => {
                              if (type === 'content') {
@@ -429,8 +480,6 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                         signal
                     );
                     
-                    discussionLog += `${expert.name} (${expert.field}): ${result.content}\n\n`;
-                    
                     // Update final content
                     set(state => {
                         if (!state.novelSession) return {};
@@ -440,9 +489,16 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                         return { novelSession: { ...state.novelSession, outlineDiscussions: msgs } };
                     });
 
-                    // Add a small delay for UI visualization
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                }
+                    return { expert, content: result.content };
+                }));
+
+                // 3. Update discussionLog for the next round
+                roundResults.forEach(({ expert, content }) => {
+                    discussionLog += `${expert.name} (${expert.field}): ${content}\n\n`;
+                });
+
+                // Add a small delay for UI visualization
+                await new Promise(resolve => setTimeout(resolve, 1000));
             }
             
             set({ currentSpeakerId: null });
@@ -471,14 +527,15 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
             // Proceed
             get().processNovelCycle();
 
-        } catch (error: any) {
-            if (error.name === 'AbortError') {
+        } catch (error) {
+            const err = error as Error & { name?: string };
+            if (err.name === 'AbortError') {
                 console.log('Outline generation aborted');
                 set({ isGenerating: false });
                 return;
             }
-            console.error('Outline generation error:', error);
-            set({ error: (error as Error).message, isGenerating: false });
+            console.error('Outline generation error:', err);
+            set({ error: err.message, isGenerating: false });
         }
     }
 
@@ -489,10 +546,21 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
         let fullContent = '';
         const segments: string[] = [];
         
-        // Retrieve current outline for this round
-        const currentOutlineRange = `第${Math.floor((novelSession.currentRound - 1) / 5) * 5 + 1}-${Math.floor((novelSession.currentRound - 1) / 5) * 5 + 5}轮`;
-        const currentOutline = novelSession.outlines.find(o => o.range === currentOutlineRange)?.content || '';
-        const outlineStage = (novelSession.currentRound - 1) % 5 + 1;
+        // Retrieve latest outline
+        let currentOutline = '';
+        let roundsInCurrentOutline = 1;
+
+        if (novelSession.outlines.length > 0) {
+            const lastOutline = novelSession.outlines[novelSession.outlines.length - 1];
+            currentOutline = lastOutline.content;
+            
+            // Parse start round from range string (e.g. "第1-5轮")
+            const match = lastOutline.range.match(/第(\d+)/);
+            if (match && match[1]) {
+                const startRound = parseInt(match[1]);
+                roundsInCurrentOutline = novelSession.currentRound - startRound + 1;
+            }
+        }
 
         // Create draft placeholder immediately
         const draftId = Date.now();
@@ -512,10 +580,12 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
         }));
         
         // Determine segment count: Only 1st Round of 1st Cycle gets 3 segments. Others get 1.
-        // "Round" in user terms = Revision Iteration? Or Cycle? 
-        // User: "Author only writes 3 times in the first round of the first cycle"
-        // Cycle = currentRound. Round = currentRevision (0-based in code, effectively 1st attempt).
-        const segmentCount = (novelSession.currentRound === 1 && novelSession.currentRevision === 0) ? 3 : 1;
+        // User update: Always generate 1 segment per round now.
+        const segmentCount = 1;
+
+        // Retrieve user choice for this round
+        const userChoiceObj = novelSession.choiceHistory.find(c => c.round === novelSession.currentRound);
+        const userChoice = userChoiceObj ? userChoiceObj.choice : undefined;
 
         // Consecutive requests
         for (let i = 0; i < segmentCount; i++) {
@@ -593,7 +663,8 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                 },
                 novelSession.worldview, // Pass worldview
                 currentOutline, // Pass outline
-                outlineStage, // Pass outlineStage
+                roundsInCurrentOutline, // Pass roundsInCurrentOutline
+                userChoice, // Pass userChoice
                 signal
             );
             
@@ -638,14 +709,15 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
         // Proceed to next phase
         get().processNovelCycle();
 
-      } catch (error: any) {
-        if (error.name === 'AbortError') {
+      } catch (error) {
+        const err = error as Error & { name?: string };
+        if (err.name === 'AbortError') {
             console.log('Drafting aborted');
             set({ isGenerating: false });
             return;
         }
-        console.error('Drafting error:', error);
-        set({ error: (error as Error).message, isGenerating: false });
+        console.error('Drafting error:', err);
+        set({ error: err.message, isGenerating: false });
       }
     }
 
@@ -655,10 +727,25 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
         try {
             const currentDraft = novelSession.drafts[novelSession.drafts.length - 1];
             
-            // Retrieve current outline for this round
-            const currentOutlineRange = `第${Math.floor((novelSession.currentRound - 1) / 5) * 5 + 1}-${Math.floor((novelSession.currentRound - 1) / 5) * 5 + 5}轮`;
-            const currentOutline = novelSession.outlines.find(o => o.range === currentOutlineRange)?.content || '';
-            const outlineStage = (novelSession.currentRound - 1) % 5 + 1;
+            // Retrieve latest outline
+            let currentOutline = '';
+            let roundsInCurrentOutline = 1;
+
+            if (novelSession.outlines.length > 0) {
+                const lastOutline = novelSession.outlines[novelSession.outlines.length - 1];
+                currentOutline = lastOutline.content;
+                
+                // Parse start round from range string (e.g. "第1-5轮")
+                const match = lastOutline.range.match(/第(\d+)/);
+                if (match && match[1]) {
+                    const startRound = parseInt(match[1]);
+                    roundsInCurrentOutline = novelSession.currentRound - startRound + 1;
+                }
+            }
+
+            // Retrieve user choice for this round
+            const userChoiceObj = novelSession.choiceHistory.find(c => c.round === novelSession.currentRound);
+            const userChoice = userChoiceObj ? userChoiceObj.choice : undefined;
 
             // Create placeholders for critiques
             const critiquePromises = novelSession.experts.map(async (expert) => {
@@ -700,19 +787,33 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                     },
                     novelSession.worldview, // Add this
                     currentOutline,
-                    novelSession.currentRound,
-                    outlineStage,
+                    roundsInCurrentOutline, // outlineStage
+                    novelSession.currentRound, // currentRound
+                    userChoice,
                     signal
                 );
                 return { expertName: expert.name, content: result.content };
             });
 
-            await Promise.all(critiquePromises);
+            const results = await Promise.all(critiquePromises);
+
+            // Check for votes to update outline
+            let voteCount = 0;
+            results.forEach(r => {
+                if (r.content.includes('【投票：更新大纲】')) {
+                    voteCount++;
+                }
+            });
+            const shouldUpdate = voteCount > (novelSession.experts.length / 2);
+            if (shouldUpdate) {
+                console.log(`[System] Outline update triggered by voting (${voteCount}/${novelSession.experts.length})`);
+            }
 
             set(state => ({
                 novelSession: state.novelSession ? {
                     ...state.novelSession,
-                    status: 'summarizing'
+                    status: 'summarizing',
+                    shouldUpdateOutline: shouldUpdate
                 } : null,
                 isGenerating: false
             }));
@@ -720,14 +821,15 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
             // Proceed to next phase
             get().processNovelCycle();
 
-        } catch (error: any) {
-            if (error.name === 'AbortError') {
+        } catch (error) {
+            const err = error as Error & { name?: string };
+            if (err.name === 'AbortError') {
                 console.log('Critique aborted');
                 set({ isGenerating: false });
                 return;
             }
-            console.error('Critique error:', error);
-            set({ error: (error as Error).message, isGenerating: false });
+            console.error('Critique error:', err);
+            set({ error: err.message, isGenerating: false });
         }
     }
 
@@ -755,7 +857,7 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                 } : null
             }));
 
-            const summaryContent = await generateCritiqueSummary(
+            await generateCritiqueSummary(
                 currentDraft.content,
                 expertCritiques,
                 (chunk) => {
@@ -782,14 +884,15 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
              // Proceed to next phase
              get().processNovelCycle();
 
-        } catch (error: any) {
-            if (error.name === 'AbortError') {
+        } catch (error) {
+            const err = error as Error & { name?: string };
+            if (err.name === 'AbortError') {
                 console.log('Summary aborted');
                 set({ isGenerating: false });
                 return;
             }
-            console.error('Summary error:', error);
-            set({ error: (error as Error).message, isGenerating: false });
+            console.error('Summary error:', err);
+            set({ error: err.message, isGenerating: false });
         }
     }
 
@@ -850,6 +953,22 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                 type: 'narrative'
             });
 
+            // 1.1 Archive to local file system (Server Call)
+            try {
+                // Non-blocking call to avoid UI freeze
+                fetch('http://localhost:3001/api/save-archive', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sessionId: novelSession.archiveSessionId,
+                        content: finalizedText,
+                        round: novelSession.currentRound
+                    })
+                }).catch(err => console.error("Archive fetch failed:", err));
+            } catch (e) {
+                console.error("Failed to initiate archive:", e);
+            }
+
             // 1.5. Trigger Analyzers (Characters & Tasks)
             // Run in background, don't block the UI transition but update store when done
             const currentRoundForAnalyzer = novelSession.currentRound;
@@ -873,7 +992,10 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                         }
                     };
                 });
-            }).catch(err => console.error("Analyzer error:", err));
+            }).catch((err: unknown) => {
+                if (typeof err === 'object' && err !== null && 'name' in err && (err as { name?: unknown }).name === 'AbortError') return;
+                console.error("Analyzer error:", err);
+            });
 
 
             set(state => {
@@ -883,20 +1005,13 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                 const isRevisionComplete = currentRevision >= state.novelSession.maxRevisions;
 
                 if (isRevisionComplete) {
-                    // CYCLE COMPLETE -> Move to next Cycle (Drafting)
-                    const nextRound = state.novelSession.currentRound + 1;
-                    const nextStatus = 'drafting';
-
+                    // Will handle option generation outside
                     return {
-                        novelSession: {
+                         novelSession: {
                             ...state.novelSession,
-                            currentRound: nextRound,
-                            status: nextStatus,
-                            currentRevision: 0, // Reset revision count for new cycle
-                            // Append to compiled story
+                            // Append to compiled story immediately so it's saved
                             compiledStory: (state.novelSession.compiledStory || '') + '\n\n' + finalizedText,
-                        },
-                        isGenerating: false
+                        }
                     };
                 } else {
                     // CYCLE NOT COMPLETE -> Go back to Critiquing for next revision round
@@ -905,30 +1020,54 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                             ...state.novelSession,
                             currentRevision: currentRevision,
                             status: 'critiquing',
-                            // Update the draft content for next critique round?
-                            // The `drafts` array already has the revised content as the last entry.
-                            // Critiquing phase picks up `drafts[last]`. So we are good.
                         },
                         isGenerating: false
                     };
                 }
             });
 
-            // If not completed, continue automatically
+            // Check if we need to generate options (Revision Complete)
+            const { novelSession: checkedSession } = get();
+            if (checkedSession && checkedSession.status === 'revising') { 
+                // If status is still revising, it means we just finished the revision loop but didn't change status yet in the block above for completion case?
+                // Wait, in the block above:
+                // If complete: I only updated compiledStory. Status is technically still 'revising' from previous state? No, I didn't update status.
+                // So yes, status is 'revising'.
+                
+                // Let's double check logic.
+                // Ideally I should update status to 'selecting_option' only after options are ready.
+                
+                const options = await generateOptions(finalizedText, signal);
+                
+                set(state => ({
+                    novelSession: state.novelSession ? {
+                        ...state.novelSession,
+                        currentOptions: options,
+                        status: 'selecting_option',
+                        currentRevision: 0
+                    } : null,
+                    isGenerating: false
+                }));
+                
+                return; // Stop here. Wait for user input.
+            }
+
+            // If not completed (status changed to critiquing above), continue automatically
             const { novelSession: updatedSession } = get();
             if (updatedSession && (updatedSession.status === 'drafting' || updatedSession.status === 'critiquing')) {
                 // IMPORTANT: Ensure we actually trigger the next cycle
                 get().processNovelCycle();
             }
 
-        } catch (error: any) {
-            if (error.name === 'AbortError') {
+        } catch (error) {
+            const err = error as Error & { name?: string };
+            if (err.name === 'AbortError') {
                 console.log('Revision aborted');
                 set({ isGenerating: false });
                 return;
             }
-            console.error('Revision error:', error);
-            set({ error: (error as Error).message, isGenerating: false });
+            console.error('Revision error:', err);
+            set({ error: err.message, isGenerating: false });
         }
     }
   }

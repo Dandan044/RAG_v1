@@ -64,6 +64,11 @@ export interface ModeratorSummary {
   timestamp: number;
 }
 
+export interface UserChoice {
+  round: number;
+  choice: string;
+}
+
 export type WorkflowPhase = 'setup' | 'drafting' | 'critiquing' | 'summarizing' | 'revising' | 'completed';
 
 export interface Outline {
@@ -111,10 +116,14 @@ export interface NovelSession {
   maxRounds: number; // This represents Max Cycles
   currentRevision: number; // Track inner revision rounds
   maxRevisions: number; // Max revision rounds per cycle (default 1)
-  status: WorkflowPhase | 'outline_discussion'; // New Status
+  status: WorkflowPhase | 'outline_discussion' | 'selecting_option'; // New Status
   enableThinking: boolean;
   createdAt: string;
   updatedAt: string;
   characters: CharacterProfile[]; // New: Character records
   tasks: StoryTask[]; // New: Task records
+  archiveSessionId: string; // New: Folder name for archiving
+  currentOptions: string[]; // Generated options for the user
+  choiceHistory: UserChoice[]; // History of user choices
+  shouldUpdateOutline?: boolean; // Trigger for dynamic outline update
 }

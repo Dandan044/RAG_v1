@@ -2,7 +2,6 @@ import { deepseekClient } from '@/lib/axios';
 import { Expert, DiscussionMessage } from '@/types';
 import { v4 as uuidv4 } from 'uuid';
 import { memoryStore } from '@/lib/vectorStore';
-import { estimateTokens, shouldSummarize } from '@/utils/tokenManager';
 import { useDebugStore } from '@/store/debugStore';
 import { useAgentConfigStore } from '@/store/agentConfigStore';
 
@@ -14,6 +13,111 @@ const processTemplate = (template: string, variables: Record<string, string | nu
         result = result.replace(regex, String(value ?? ''));
     }
     return result;
+};
+
+type JsonRecord = Record<string, unknown>;
+
+type ChatToolCall = {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+};
+
+type ChatMessage =
+  | { role: 'system' | 'user' | 'assistant'; content: string | null; tool_calls?: ChatToolCall[] }
+  | { role: 'tool'; tool_call_id: string; content: string };
+
+type ChatTool = {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: JsonRecord;
+  };
+};
+
+type ChatRequest = {
+  model: string;
+  messages: ChatMessage[];
+  temperature: number;
+  stream?: boolean;
+  response_format?: { type: 'json_object' };
+  tools?: ChatTool[];
+  thinking?: { type: 'enabled' };
+};
+
+const isRecord = (value: unknown): value is JsonRecord => typeof value === 'object' && value !== null;
+
+const isAbortError = (error: unknown): boolean =>
+  isRecord(error) && typeof error.name === 'string' && error.name === 'AbortError';
+
+const parseJsonLoose = (raw: string): unknown => {
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    const clean = raw.replace(/```json/g, '').replace(/```/g, '').trim();
+    return JSON.parse(clean) as unknown;
+  }
+};
+
+const extractExpertsArray = (parsed: unknown): unknown[] => {
+  if (Array.isArray(parsed)) return parsed;
+  if (isRecord(parsed) && Array.isArray(parsed.experts)) return parsed.experts;
+  throw new Error('Parsed experts data is not an array');
+};
+
+const getString = (obj: JsonRecord, key: string): string | undefined => {
+  const value = obj[key];
+  return typeof value === 'string' ? value : undefined;
+};
+
+const normalizeExpert = (raw: unknown): Expert => {
+  if (!isRecord(raw)) {
+    const name = '未知专家';
+    return {
+      id: uuidv4(),
+      name,
+      field: '',
+      personality: '',
+      initialStance: '',
+      color: '#64748b',
+      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(name)}`
+    };
+  }
+
+  const name = getString(raw, 'name') ?? '未知专家';
+
+  return {
+    id: uuidv4(),
+    name,
+    field: getString(raw, 'field') ?? '',
+    personality: getString(raw, 'personality') ?? '',
+    initialStance: getString(raw, 'initialStance') ?? '',
+    color: getString(raw, 'color') ?? '#64748b',
+    avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(name)}`
+  };
+};
+
+const SEARCH_TOOL = {
+  type: "function",
+  function: {
+    name: "search_novel_memory",
+    description: "检索关于人物（性格、外貌、经历）、任务（当前进度、目标）、剧情（前文发生的事）等信息。当需要引用具体设定或回顾前文时请务必使用。",
+    parameters: {
+      type: "object",
+      properties: {
+        queries: {
+          type: "array",
+          items: { type: "string" },
+          description: "查询关键词列表，例如 ['主角现在的任务', '反派的弱点', '上一章发生的爆炸']"
+        }
+      },
+      required: ["queries"]
+    }
+  }
 };
 
 export const generateExperts = async (topic: string, count: number = 5): Promise<Expert[]> => {
@@ -44,7 +148,7 @@ export const generateExperts = async (topic: string, count: number = 5): Promise
     // Log debug info
     useDebugStore.getState().addLog({
         type: 'system',
-        agentName: 'Expert Generator',
+        agentName: 'Expert Generator (专家生成器)',
         request: {
             model: config.model,
             systemPrompt: messages[0].content as string,
@@ -56,25 +160,11 @@ export const generateExperts = async (topic: string, count: number = 5): Promise
         }
     });
 
-    let expertsData;
-    try {
-        expertsData = JSON.parse(content);
-        // Handle case where API returns object with key instead of array
-        if (expertsData.experts) expertsData = expertsData.experts;
-        if (!Array.isArray(expertsData)) throw new Error('Parsed data is not an array');
-    } catch (e) {
-        // Fallback cleanup if JSON parsing fails or markdown blocks exist
-        const cleanContent = content.replace(/```json/g, '').replace(/```/g, '').trim();
-        expertsData = JSON.parse(cleanContent);
-        if (expertsData.experts) expertsData = expertsData.experts;
-    }
-
-    return expertsData.map((expert: any) => ({
-      ...expert,
-      id: uuidv4(),
-      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${expert.name}` // Using DiceBear for avatars
-    }));
+    const parsed = parseJsonLoose(content);
+    const expertsData = extractExpertsArray(parsed);
+    return expertsData.map(normalizeExpert);
   } catch (error) {
+    if (isAbortError(error)) throw error;
     console.error('Error generating experts:', error);
     throw error;
   }
@@ -104,9 +194,7 @@ export const generateExpertResponse = async (
         topic
     });
     
-    const requestBody: any = {
-      model: config.model,
-      messages: [
+    const messages: ChatMessage[] = [
         {
           role: 'system',
           content: systemPrompt
@@ -115,13 +203,18 @@ export const generateExpertResponse = async (
           role: 'user',
           content: `目前的讨论进展如下：\n\n${context}\n\n现在轮到你发言了。你的观点是什么？`
         }
-      ],
+    ];
+
+    const requestBody: ChatRequest = {
+      model: config.model,
+      messages,
+      tools: [SEARCH_TOOL as ChatTool],
       temperature: config.temperature,
       stream: true
     };
 
     if (enableThinking) {
-      requestBody.thinking = { "type": "enabled" };
+      requestBody.thinking = { type: 'enabled' };
     }
 
     const response = await fetch('https://api.deepseek.com/chat/completions', {
@@ -134,12 +227,134 @@ export const generateExpertResponse = async (
     });
 
     if (!response.body) throw new Error('No response body');
-    const result = await processStreamResponse(response, onChunk);
+    
+    // Custom stream processor for tool calls (Copied from generateExpertCritique logic)
+    const result = await (async () => {
+        const reader = response.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let fullContent = '';
+        let fullThinking = '';
+        let toolCallBuffer: { id: string; name: string } | null = null;
+        let toolCallArgs = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+
+          for (const line of lines) {
+            const trimmed = line.trimEnd();
+            if (!trimmed.startsWith('data:')) continue;
+            const payload = trimmed.slice(5).trimStart();
+            if (payload === '[DONE]' || payload.length === 0) continue;
+            try {
+                const data = JSON.parse(payload);
+                if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) continue;
+                
+                const delta = data.choices[0].delta;
+                if (!delta) continue;
+                
+                if (delta.reasoning_content) {
+                    fullThinking += delta.reasoning_content;
+                    onChunk?.(delta.reasoning_content, 'thinking');
+                }
+                
+                if (delta.tool_calls) {
+                    const first = delta.tool_calls[0];
+                    const id = first?.id;
+                    const name = first?.function?.name;
+                    if (!toolCallBuffer && id && name) toolCallBuffer = { id, name };
+                }
+                
+                if (toolCallBuffer && delta.tool_calls?.[0]?.function?.arguments) {
+                    toolCallArgs += delta.tool_calls[0].function.arguments ?? '';
+                }
+
+                if (delta.content) {
+                    fullContent += delta.content;
+                    onChunk?.(delta.content, 'content');
+                }
+
+                if (data.choices[0].finish_reason === 'tool_calls') {
+                    if (toolCallBuffer && toolCallBuffer.name === 'search_novel_memory') {
+                        const args = (() => {
+                            try { return JSON.parse(toolCallArgs) as { queries?: unknown }; } catch { return {}; }
+                        })();
+
+                        const queries = Array.isArray(args.queries)
+                            ? args.queries.filter((q): q is string => typeof q === 'string')
+                            : [];
+                        let searchResults = '';
+                        
+                        if (queries.length > 0) {
+                            for (const q of queries) {
+                                const results = await memoryStore.search(q);
+                                searchResults += `查询 "${q}":\n` + (results.length > 0 ? results.map(r => `- ${r.segment.text}`).join('\n') : "未找到相关信息") + '\n\n';
+                            }
+                        } else {
+                            searchResults = "未提供有效查询词，未执行检索。";
+                        }
+                        
+                        const toolMsg = {
+                            role: 'assistant',
+                            content: null,
+                            tool_calls: [{
+                                id: toolCallBuffer.id,
+                                type: 'function',
+                                function: {
+                                    name: toolCallBuffer.name,
+                                    arguments: toolCallArgs
+                                }
+                            }]
+                        } satisfies ChatMessage;
+                        const toolOutputMsg = {
+                            role: 'tool',
+                            tool_call_id: toolCallBuffer.id,
+                            content: searchResults || "未找到相关记忆。"
+                        } satisfies ChatMessage;
+                        
+                        const searchLog = `\n[系统] 正在检索记忆库: ${queries.join(', ')}...\n找到相关信息:\n${searchResults}\n`;
+                        onChunk?.(searchLog, 'thinking');
+                        fullThinking += searchLog;
+
+                        toolCallBuffer = null;
+                        toolCallArgs = '';
+
+                        const nextResponse = await fetch('https://api.deepseek.com/chat/completions', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${apiKey}`
+                            },
+                            body: JSON.stringify({
+                                model: config.model,
+                                messages: [...messages, toolMsg, toolOutputMsg],
+                                temperature: config.temperature,
+                                stream: true,
+                                thinking: enableThinking ? { type: 'enabled' } : undefined
+                            })
+                        });
+                        
+                        return processStreamResponse(nextResponse, onChunk);
+                    }
+                }
+
+            } catch {
+              continue;
+            }
+          }
+        }
+        return { content: fullContent, thinking: fullThinking };
+    })();
 
     // Log debug info
     useDebugStore.getState().addLog({
         type: 'expert',
-        agentName: currentExpert.name,
+        agentName: `${currentExpert.name} (${currentExpert.field})`,
         request: {
             model: config.model,
             systemPrompt: requestBody.messages[0].content,
@@ -154,6 +369,7 @@ export const generateExpertResponse = async (
 
     return result;
   } catch (error) {
+    if (isAbortError(error)) throw error;
     console.error('Error generating response:', error);
     throw error;
   }
@@ -209,7 +425,7 @@ export const generateConclusion = async (
     // Log debug info
     useDebugStore.getState().addLog({
         type: 'moderator',
-        agentName: 'Conclusion Generator',
+        agentName: 'Conclusion Generator (总结生成器)',
         request: {
             model: config.model,
             systemPrompt: requestMessages[0].content as string,
@@ -223,6 +439,7 @@ export const generateConclusion = async (
 
     return result.content;
   } catch (error) {
+    if (isAbortError(error)) throw error;
     console.error('Error generating conclusion:', error);
     throw error;
   }
@@ -258,7 +475,7 @@ export const generateExpertSuggestions = async (requirements: string, count: num
     // Log debug info
     useDebugStore.getState().addLog({
         type: 'system',
-        agentName: 'Expert Suggestion System',
+        agentName: 'Expert Suggestion System (专家推荐系统)',
         request: {
             model: config.model,
             systemPrompt: messages[0].content as string,
@@ -270,23 +487,11 @@ export const generateExpertSuggestions = async (requirements: string, count: num
         }
     });
 
-    let expertsData;
-    try {
-        expertsData = JSON.parse(content);
-        if (expertsData.experts) expertsData = expertsData.experts;
-        if (!Array.isArray(expertsData)) throw new Error('Parsed data is not an array');
-    } catch (e) {
-        const cleanContent = content.replace(/```json/g, '').replace(/```/g, '').trim();
-        expertsData = JSON.parse(cleanContent);
-        if (expertsData.experts) expertsData = expertsData.experts;
-    }
-
-    return expertsData.map((expert: any) => ({
-      ...expert,
-      id: uuidv4(),
-      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${expert.name}`
-    }));
+    const parsed = parseJsonLoose(content);
+    const expertsData = extractExpertsArray(parsed);
+    return expertsData.map(normalizeExpert);
   } catch (error) {
+    if (isAbortError(error)) throw error;
     console.error('Error generating expert suggestions:', error);
     throw error;
   }
@@ -327,7 +532,7 @@ export const summarizeStory = async (content: string): Promise<string> => {
     // Log debug info
     useDebugStore.getState().addLog({
         type: 'summary',
-        agentName: 'Story Summarizer',
+        agentName: 'Story Summarizer (剧情摘要器)',
         request: {
             model: config.model,
             systemPrompt: messages[0].content as string,
@@ -341,6 +546,7 @@ export const summarizeStory = async (content: string): Promise<string> => {
 
     return result;
   } catch (error) {
+    if (isAbortError(error)) throw error;
     console.error('Error summarizing story:', error);
     return content.slice(-2000); // Fallback
   }
@@ -355,6 +561,7 @@ export const generateNovelSegment = async (
   worldview?: string,
   outline?: string,
   outlineStage?: number, // New: Stage of outline (1-5)
+  userChoice?: string,
   signal?: AbortSignal
 ): Promise<{ content: string; thinking: string }> => {
   try {
@@ -365,17 +572,18 @@ export const generateNovelSegment = async (
     const totalSegmentMsg = segmentIndex < 3 ? '（共3部分）' : '';
     const worldviewMsg = worldview ? `【世界观设定】（必须严格遵守）：\n${worldview}\n` : '';
     const outlineMsg = outline ? `【当前阶段大纲】（必须严格执行）：\n${outline}\n` : '';
-    const outlineStageMsg = outlineStage ? `【大纲进度】：当前处于本阶段大纲的第 ${outlineStage}/5 阶段。请把控好剧情节奏，${outlineStage === 5 ? '做好本阶段的收尾。' : '稳步推进剧情。'}\n` : '';
+    const outlineStageMsg = outlineStage ? `【大纲进度】：这是当前大纲阶段的第 ${outlineStage} 次写作。请把控好剧情节奏，稳步推进剧情。\n` : '';
 
     const systemPrompt = processTemplate(config.systemPrompt, {
         segmentIndex: segmentIndex + 1,
         totalSegmentMsg,
         worldview: worldviewMsg,
         outline: outlineMsg,
-        outlineStageMsg
+        outlineStageMsg,
+        userChoice: userChoice || "无（起始章节）"
     });
 
-    const requestBody: any = {
+    const requestBody: ChatRequest = {
       model: config.model,
       messages: [
         {
@@ -384,7 +592,7 @@ export const generateNovelSegment = async (
         },
         {
           role: 'user',
-          content: `小说要求：${requirements}\n\n前文内容：\n${previousContent}\n\n请继续创作下一段内容（注意字数限制在600字以内，**仅输出正文**）。`
+          content: `小说要求：${requirements}\n\n前文内容：\n${previousContent}\n\n请继续创作下一段内容（注意字数限制在100-1500字以内，**仅输出正文**）。`
         }
       ],
       temperature: config.temperature,
@@ -392,7 +600,7 @@ export const generateNovelSegment = async (
     };
 
     if (enableThinking) {
-      requestBody.thinking = { "type": "enabled" };
+      requestBody.thinking = { type: 'enabled' };
     }
 
     const response = await fetch('https://api.deepseek.com/chat/completions', {
@@ -411,7 +619,7 @@ export const generateNovelSegment = async (
     // Log debug info
     useDebugStore.getState().addLog({
         type: 'writer',
-        agentName: 'Novel Writer',
+        agentName: 'Novel Writer (小说家)',
         request: {
             model: config.model,
             systemPrompt: requestBody.messages[0].content,
@@ -426,6 +634,7 @@ export const generateNovelSegment = async (
 
     return result;
   } catch (error) {
+    if (isAbortError(error)) throw error;
     console.error('Error generating novel segment:', error);
     throw error;
   }
@@ -440,6 +649,7 @@ export const generateExpertCritique = async (
   outline?: string,
   outlineStage?: number,
   currentRound?: number,
+  userChoice?: string,
   signal?: AbortSignal
 ): Promise<{ content: string; thinking: string }> => {
   try {
@@ -447,31 +657,12 @@ export const generateExpertCritique = async (
     const config = useAgentConfigStore.getState().getConfig('expert_critique');
     
     // Tools definition for DeepSeek
-    const tools = [
-      {
-        type: "function",
-        function: {
-          name: "search_novel_memory",
-          description: "从历史小说章节中检索关于时间、地点、人物、任务、概念等信息，以检查当前草稿是否与前文矛盾。",
-          parameters: {
-            type: "object",
-            properties: {
-              queries: {
-                type: "array",
-                items: { type: "string" },
-                description: "需要查询的关键词列表，例如 ['主角的手臂伤势', '上次发生爆炸的时间']"
-              }
-            },
-            required: ["queries"]
-          }
-        }
-      }
-    ];
+    const tools = [SEARCH_TOOL as ChatTool];
 
     // Process variables
     const worldviewMsg = worldview ? `【世界观设定】：\n${worldview}\n` : '';
     const outlineMsg = outline ? `同时请检查剧情走向是否符合【当前阶段大纲】：\n${outline}` : '';
-    const outlineStageMsg = outlineStage ? `【大纲进度】：当前处于本阶段大纲的第 ${outlineStage}/5 阶段。` : '';
+    const outlineStageMsg = outlineStage ? `【大纲进度】：这是当前大纲阶段的第 ${outlineStage} 次写作。` : '';
     
     const thinkingInstruction = enableThinking 
             ? `4. **无错即止**：如果发现没有明显的逻辑漏洞或硬伤，请直接回答“无逻辑漏洞，无需修改”。` 
@@ -484,10 +675,11 @@ export const generateExpertCritique = async (
         worldview: worldviewMsg,
         outline: outlineMsg,
         outlineStageMsg,
-        thinkingInstruction
+        thinkingInstruction,
+        userChoice: userChoice || "无"
     });
 
-    const messages: any[] = [
+    const messages: ChatMessage[] = [
       {
         role: 'system',
         content: systemPrompt
@@ -498,16 +690,16 @@ export const generateExpertCritique = async (
       }
     ];
 
-    const requestBody: any = {
+    const requestBody: ChatRequest = {
       model: config.model,
       messages: messages,
-      tools: tools,
+      tools: tools as ChatTool[],
       temperature: config.temperature,
       stream: true
     };
 
     if (enableThinking) {
-      requestBody.thinking = { "type": "enabled" };
+      requestBody.thinking = { type: 'enabled' };
     }
 
     const response = await fetch('https://api.deepseek.com/chat/completions', {
@@ -526,22 +718,39 @@ export const generateExpertCritique = async (
     const result = await (async () => {
         const reader = response.body!.getReader();
         const decoder = new TextDecoder();
+        let buffer = '';
         let fullContent = '';
         let fullThinking = '';
-        let toolCallBuffer: any = null;
+        let toolCallBuffer: { id: string; name: string } | null = null;
         let toolCallArgs = '';
 
         while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
-        
-        for (const line of lines) {
-            if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+
+          for (const line of lines) {
+            const trimmed = line.trimEnd();
+            if (!trimmed.startsWith('data:')) continue;
+            const payload = trimmed.slice(5).trimStart();
+            if (payload === '[DONE]' || payload.length === 0) continue;
             try {
-                const data = JSON.parse(line.slice(6));
+                const data = JSON.parse(payload) as {
+                    choices?: Array<{
+                        delta?: {
+                            reasoning_content?: string;
+                            content?: string;
+                            tool_calls?: Array<{
+                                id?: string;
+                                function?: { name?: string; arguments?: string };
+                            }>;
+                        };
+                        finish_reason?: string;
+                    }>;
+                };
                 if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) continue;
                 
                 const delta = data.choices[0].delta;
@@ -553,29 +762,35 @@ export const generateExpertCritique = async (
                 }
                 
                 if (delta.tool_calls) {
-                if (!toolCallBuffer) toolCallBuffer = delta.tool_calls[0];
+                    const first = delta.tool_calls[0];
+                    const id = first?.id;
+                    const name = first?.function?.name;
+                    if (!toolCallBuffer && id && name) toolCallBuffer = { id, name };
                 }
                 
                 if (toolCallBuffer && delta.tool_calls?.[0]?.function?.arguments) {
-                    toolCallArgs += delta.tool_calls[0].function.arguments;
+                    toolCallArgs += delta.tool_calls[0].function.arguments ?? '';
                 }
 
                 if (delta.content) {
                 fullContent += delta.content;
                 onChunk?.(delta.content, 'content');
                 }
-                
-                if (data.choices[0].finish_reason === 'tool_calls') {
-                    if (toolCallBuffer && toolCallBuffer.function.name === 'search_novel_memory') {
-                        // Safe parse arguments
-                        let args = { queries: [] };
-                        try {
-                            args = JSON.parse(toolCallArgs);
-                        } catch (e) {
-                            console.error("Failed to parse tool args:", toolCallArgs);
-                        }
 
-                        const queries = args.queries || [];
+                if (data.choices[0].finish_reason === 'tool_calls') {
+                    if (toolCallBuffer && toolCallBuffer.name === 'search_novel_memory') {
+                        // Safe parse arguments
+                        const args = (() => {
+                            try {
+                                return JSON.parse(toolCallArgs) as { queries?: unknown };
+                            } catch {
+                                return {};
+                            }
+                        })();
+
+                        const queries = Array.isArray(args.queries)
+                            ? args.queries.filter((q): q is string => typeof q === 'string')
+                            : [];
                         let searchResults = '';
                         
                         if (queries.length > 0) {
@@ -594,16 +809,16 @@ export const generateExpertCritique = async (
                                 id: toolCallBuffer.id,
                                 type: 'function',
                                 function: {
-                                    name: toolCallBuffer.function.name,
+                                    name: toolCallBuffer.name,
                                     arguments: toolCallArgs
                                 }
                             }]
-                        };
+                        } satisfies ChatMessage;
                         const toolOutputMsg = {
                             role: 'tool',
                             tool_call_id: toolCallBuffer.id,
                             content: searchResults || "未找到相关记忆。"
-                        };
+                        } satisfies ChatMessage;
                         
                         const searchLog = `\n[系统] 正在检索记忆库: ${queries.join(', ')}...\n找到相关信息:\n${searchResults}\n`;
                         onChunk?.(searchLog, 'thinking');
@@ -624,7 +839,7 @@ export const generateExpertCritique = async (
                                 messages: [...messages, toolMsg, toolOutputMsg],
                                 temperature: config.temperature,
                                 stream: true,
-                                thinking: enableThinking ? { "type": "enabled" } : undefined
+                                thinking: enableThinking ? { type: 'enabled' } : undefined
                             }),
                             signal
                         });
@@ -633,11 +848,10 @@ export const generateExpertCritique = async (
                     }
                 }
 
-            } catch (e) {
-                console.error('Error parsing SSE:', e);
+            } catch {
+              continue;
             }
-            }
-        }
+          }
         }
 
         return { content: fullContent, thinking: fullThinking };
@@ -661,6 +875,7 @@ export const generateExpertCritique = async (
 
     return result;
   } catch (error) {
+    if (isAbortError(error)) throw error;
     console.error('Error generating expert critique:', error);
     throw error;
   }
@@ -712,7 +927,7 @@ export const generateCritiqueSummary = async (
     // Log debug info
     useDebugStore.getState().addLog({
         type: 'moderator',
-        agentName: 'Critique Summarizer',
+        agentName: 'Critique Summarizer (评审总结器)',
         request: {
             model: config.model,
             systemPrompt: messages[0].content as string,
@@ -726,6 +941,7 @@ export const generateCritiqueSummary = async (
 
     return result.content;
   } catch (error) {
+    if (isAbortError(error)) throw error;
     console.error('Error generating critique summary:', error);
     throw error;
   }
@@ -745,7 +961,7 @@ export const rewriteNovel = async (
 
     const systemPrompt = processTemplate(config.systemPrompt, { requirements });
     
-    const requestBody: any = {
+    const requestBody: ChatRequest = {
       model: config.model,
       messages: [
         {
@@ -762,7 +978,7 @@ export const rewriteNovel = async (
     };
 
     if (enableThinking) {
-      requestBody.thinking = { "type": "enabled" };
+      requestBody.thinking = { type: 'enabled' };
     }
 
     const response = await fetch('https://api.deepseek.com/chat/completions', {
@@ -781,7 +997,7 @@ export const rewriteNovel = async (
     // Log debug info
     useDebugStore.getState().addLog({
         type: 'writer',
-        agentName: 'Novel Writer (Revision)',
+        agentName: 'Novel Writer (Revision) (小说家-修订)',
         request: {
             model: config.model,
             systemPrompt: requestBody.messages[0].content,
@@ -796,6 +1012,7 @@ export const rewriteNovel = async (
 
     return result;
   } catch (error) {
+    if (isAbortError(error)) throw error;
     console.error('Error rewriting novel:', error);
     throw error;
   }
@@ -827,17 +1044,20 @@ export const generateOutlineContribution = async (
             endRound: currentRound + 4
         });
 
-        const requestBody: any = {
+        const messages: ChatMessage[] = [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `请发表你对接下来5轮剧情的大纲建议。` }
+        ];
+
+        const requestBody: ChatRequest = {
             model: config.model,
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: `请发表你对接下来5轮剧情的大纲建议。` }
-            ],
+            messages,
+            tools: [SEARCH_TOOL as ChatTool],
             temperature: config.temperature,
             stream: true
         };
 
-        if (enableThinking) requestBody.thinking = { "type": "enabled" };
+        if (enableThinking) requestBody.thinking = { type: 'enabled' };
 
         const response = await fetch('https://api.deepseek.com/chat/completions', {
             method: 'POST',
@@ -850,12 +1070,135 @@ export const generateOutlineContribution = async (
         });
 
         if (!response.body) throw new Error('No response body');
-        const result = await processStreamResponse(response, onChunk);
+
+        // Custom stream processor for tool calls
+        const result = await (async () => {
+            const reader = response.body!.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let fullContent = '';
+            let fullThinking = '';
+            let toolCallBuffer: { id: string; name: string } | null = null;
+            let toolCallArgs = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() ?? '';
+
+                for (const line of lines) {
+                    const trimmed = line.trimEnd();
+                    if (!trimmed.startsWith('data:')) continue;
+                    const payload = trimmed.slice(5).trimStart();
+                    if (payload === '[DONE]' || payload.length === 0) continue;
+                    try {
+                        const data = JSON.parse(payload);
+                        if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) continue;
+
+                        const delta = data.choices[0].delta;
+                        if (!delta) continue;
+
+                        if (delta.reasoning_content) {
+                            fullThinking += delta.reasoning_content;
+                            onChunk?.(delta.reasoning_content, 'thinking');
+                        }
+
+                        if (delta.tool_calls) {
+                            const first = delta.tool_calls[0];
+                            const id = first?.id;
+                            const name = first?.function?.name;
+                            if (!toolCallBuffer && id && name) toolCallBuffer = { id, name };
+                        }
+
+                        if (toolCallBuffer && delta.tool_calls?.[0]?.function?.arguments) {
+                            toolCallArgs += delta.tool_calls[0].function.arguments ?? '';
+                        }
+
+                        if (delta.content) {
+                            fullContent += delta.content;
+                            onChunk?.(delta.content, 'content');
+                        }
+
+                        if (data.choices[0].finish_reason === 'tool_calls') {
+                            if (toolCallBuffer && toolCallBuffer.name === 'search_novel_memory') {
+                                const args = (() => {
+                                    try { return JSON.parse(toolCallArgs) as { queries?: unknown }; } catch { return {}; }
+                                })();
+
+                                const queries = Array.isArray(args.queries)
+                                    ? args.queries.filter((q): q is string => typeof q === 'string')
+                                    : [];
+                                let searchResults = '';
+
+                                if (queries.length > 0) {
+                                    for (const q of queries) {
+                                        const results = await memoryStore.search(q);
+                                        searchResults += `查询 "${q}":\n` + (results.length > 0 ? results.map(r => `- ${r.segment.text}`).join('\n') : "未找到相关信息") + '\n\n';
+                                    }
+                                } else {
+                                    searchResults = "未提供有效查询词，未执行检索。";
+                                }
+
+                                const toolMsg = {
+                                    role: 'assistant',
+                                    content: null,
+                                    tool_calls: [{
+                                        id: toolCallBuffer.id,
+                                        type: 'function',
+                                        function: {
+                                            name: toolCallBuffer.name,
+                                            arguments: toolCallArgs
+                                        }
+                                    }]
+                                } satisfies ChatMessage;
+                                const toolOutputMsg = {
+                                    role: 'tool',
+                                    tool_call_id: toolCallBuffer.id,
+                                    content: searchResults || "未找到相关记忆。"
+                                } satisfies ChatMessage;
+
+                                const searchLog = `\n[系统] 正在检索记忆库: ${queries.join(', ')}...\n找到相关信息:\n${searchResults}\n`;
+                                onChunk?.(searchLog, 'thinking');
+                                fullThinking += searchLog;
+
+                                toolCallBuffer = null;
+                                toolCallArgs = '';
+
+                                const nextResponse = await fetch('https://api.deepseek.com/chat/completions', {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json',
+                                        'Authorization': `Bearer ${apiKey}`
+                                    },
+                                    body: JSON.stringify({
+                                        model: config.model,
+                                        messages: [...messages, toolMsg, toolOutputMsg],
+                                        temperature: config.temperature,
+                                        stream: true,
+                                        thinking: enableThinking ? { type: 'enabled' } : undefined
+                                    }),
+                                    signal
+                                });
+
+                                return processStreamResponse(nextResponse, onChunk);
+                            }
+                        }
+
+                    } catch {
+                        continue;
+                    }
+                }
+            }
+            return { content: fullContent, thinking: fullThinking };
+        })();
 
         // Log debug info
         useDebugStore.getState().addLog({
             type: 'outline',
-            agentName: expert.name,
+            agentName: `${expert.name} (${expert.field})`,
             request: {
                 model: config.model,
                 systemPrompt: requestBody.messages[0].content,
@@ -870,6 +1213,7 @@ export const generateOutlineContribution = async (
 
         return result;
     } catch (error) {
+        if (isAbortError(error)) throw error;
         console.error('Error generating outline contribution:', error);
         throw error;
     }
@@ -924,7 +1268,7 @@ export const generateOutlineSummary = async (
         // Log debug info
         useDebugStore.getState().addLog({
             type: 'outline',
-            agentName: 'Outline Summarizer',
+            agentName: 'Outline Summarizer (大纲总结器)',
             request: {
                 model: config.model,
                 systemPrompt: messages[0].content as string,
@@ -938,6 +1282,7 @@ export const generateOutlineSummary = async (
 
         return result.content;
     } catch (error) {
+        if (isAbortError(error)) throw error;
         console.error('Error generating outline summary:', error);
         throw error;
     }
@@ -982,7 +1327,7 @@ export const generateWorldview = async (requirements: string, signal?: AbortSign
         // Log debug info
         useDebugStore.getState().addLog({
             type: 'system',
-            agentName: 'Worldview Architect',
+            agentName: 'Worldview Architect (世界观架构师)',
             request: {
                 model: config.model,
                 systemPrompt: messages[0].content as string,
@@ -995,8 +1340,8 @@ export const generateWorldview = async (requirements: string, signal?: AbortSign
         });
 
         return result;
-    } catch (error: any) {
-        if (error.name === 'AbortError') {
+    } catch (error: unknown) {
+        if (isAbortError(error)) {
              console.log('Worldview generation aborted');
              throw error;
         }
@@ -1014,18 +1359,23 @@ async function processStreamResponse(
     const decoder = new TextDecoder();
     let fullContent = '';
     let fullThinking = '';
+    let buffer = '';
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      const chunk = decoder.decode(value, { stream: true });
-      const lines = chunk.split('\n');
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
       
       for (const line of lines) {
-        if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+        const trimmed = line.trimEnd();
+        if (!trimmed.startsWith('data:')) continue;
+        const payload = trimmed.slice(5).trimStart();
+        if (payload === '[DONE]' || payload.length === 0) continue;
           try {
-            const data = JSON.parse(line.slice(6));
+            const data = JSON.parse(payload);
             if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) continue;
 
             const delta = data.choices[0].delta;
@@ -1040,11 +1390,71 @@ async function processStreamResponse(
               fullContent += delta.content;
               onChunk?.(delta.content, 'content');
             }
-          } catch (e) {
-            console.error('Error parsing SSE:', e, 'Line:', line);
+          } catch {
+            continue;
           }
-        }
       }
     }
     return { content: fullContent, thinking: fullThinking };
 }
+
+export const generateOptions = async (
+    currentStory: string,
+    signal?: AbortSignal
+  ): Promise<string[]> => {
+      try {
+          const apiKey = import.meta.env.VITE_DEEPSEEK_API_KEY;
+          const config = useAgentConfigStore.getState().getConfig('option_generator');
+  
+          const messages = [
+              { role: 'system', content: config.systemPrompt },
+              { role: 'user', content: `当前故事内容：\n${currentStory}\n\n请生成3个选项。` }
+          ];
+  
+          const response = await fetch('https://api.deepseek.com/chat/completions', {
+              method: 'POST',
+              headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${apiKey}`
+              },
+              body: JSON.stringify({
+                  model: config.model,
+                  messages,
+                  temperature: config.temperature,
+                  response_format: { type: 'json_object' },
+                  stream: false
+              }),
+              signal
+          });
+          
+          if (!response.ok) {
+              throw new Error(`Option generation failed: ${response.statusText}`);
+          }
+
+          const data = await response.json();
+          const content = data.choices[0].message.content;
+          
+          // Log debug info
+          useDebugStore.getState().addLog({
+              type: 'system',
+              agentName: 'Option Generator (选项生成器)',
+              request: {
+                  model: config.model,
+                  systemPrompt: messages[0].content as string,
+                  userPrompt: messages[1].content as string,
+                  temperature: config.temperature
+              },
+              response: { content }
+          });
+  
+          const parsed = parseJsonLoose(content);
+          if (Array.isArray(parsed) && parsed.every(i => typeof i === 'string')) {
+              return parsed;
+          }
+          return ["继续探索", "观察四周", "等待时机"]; // Fallback
+      } catch (error) {
+          if (isAbortError(error)) throw error;
+          console.error('Error generating options:', error);
+          return ["继续探索", "观察四周", "等待时机"];
+      }
+  };
