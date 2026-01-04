@@ -11,6 +11,7 @@ export type AgentType =
     | 'expert_critique'
     | 'critique_summarizer'
     | 'novel_rewriter'
+    | 'option_generator'
     | 'outline_contributor'
     | 'outline_summarizer'
     | 'worldview_architect'
@@ -128,7 +129,7 @@ export const DEFAULT_CONFIGS: Record<AgentType, AgentConfig> = {
              - 采用第二人称（“你”）或第三人称视角，增强代入感。
              - 注重环境描写和感官体验。
           4. 字数控制：
-             - 严格控制在 100 - 1500 字之间。
+             - 严格控制在 100 - 300 字之间。
              - 不要过于冗长，保持节奏紧凑。
           5. **仅输出故事正文**。严禁包含任何解释、前言、后记、元数据或“修改说明”。`
     },

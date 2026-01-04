@@ -361,12 +361,20 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
 
   submitOption: (choice: string) => {
     // Wrap in setTimeout to avoid updating state during render of parent components
-    // if this is triggered synchronously (though setInterval usually prevents this)
     setTimeout(() => {
         set(state => {
             if (!state.novelSession) return {};
+            
+            // Prevent duplicate submissions if status already changed
+            if (state.novelSession.status !== 'selecting_option') {
+                return {};
+            }
+
             const nextRound = state.novelSession.currentRound + 1;
             
+            // Append choice to compiled story with styling
+            const choiceText = `\n\n> **【抉择】 ${choice}**\n\n***\n\n`;
+
             return {
                 novelSession: {
                     ...state.novelSession,
@@ -375,6 +383,7 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                     status: 'drafting',
                     currentRevision: 0,
                     currentOptions: [],
+                    compiledStory: state.novelSession.compiledStory + choiceText
                 }
             };
         });
@@ -583,8 +592,8 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
         // User update: Always generate 1 segment per round now.
         const segmentCount = 1;
 
-        // Retrieve user choice for this round
-        const userChoiceObj = novelSession.choiceHistory.find(c => c.round === novelSession.currentRound);
+        // Retrieve user choice for this round (Choice made at end of previous round)
+        const userChoiceObj = novelSession.choiceHistory.find(c => c.round === novelSession.currentRound - 1);
         const userChoice = userChoiceObj ? userChoiceObj.choice : undefined;
 
         // Consecutive requests
@@ -743,8 +752,8 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                 }
             }
 
-            // Retrieve user choice for this round
-            const userChoiceObj = novelSession.choiceHistory.find(c => c.round === novelSession.currentRound);
+            // Retrieve user choice for this round (Choice made at end of previous round)
+            const userChoiceObj = novelSession.choiceHistory.find(c => c.round === novelSession.currentRound - 1);
             const userChoice = userChoiceObj ? userChoiceObj.choice : undefined;
 
             // Create placeholders for critiques
@@ -1009,7 +1018,19 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                     return {
                          novelSession: {
                             ...state.novelSession,
-                            // Append to compiled story immediately so it's saved
+                            // DO NOT append to compiledStory here if we are already streaming it in UI.
+                            // But we need to persist it.
+                            // The issue is: The UI appends streamingContent to compiledStory for display.
+                            // If we append here, the UI will see (compiledStory + finalized) + (streamingContent which is finalized) -> Duplicate?
+                            // No, once status changes from 'revising', streamingContent becomes empty.
+                            // So appending here is correct for persistence.
+                            // The user says "定稿视图中会存在两次相同的定稿内容".
+                            // This might be because the UI renders `novelSession.compiledStory` AND `streamingContent`.
+                            // If `compiledStory` is updated BEFORE status changes away from 'revising', we get double render.
+                            // But here we update compiledStory AND status (implicitly, or in next tick?)
+                            // Actually, we DO NOT change status here immediately to something else than revising/critiquing?
+                            // Ah, below we set status to 'selecting_option' or 'critiquing'.
+                            
                             compiledStory: (state.novelSession.compiledStory || '') + '\n\n' + finalizedText,
                         }
                     };
@@ -1039,12 +1060,20 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                 
                 const options = await generateOptions(finalizedText, signal);
                 
+                // Add separator and user choice marker to compiled story if needed, or handle in UI?
+                // User wants: "将玩家做出的选择文本，也追加到定稿视图中，要在显示中区分"
+                // We should append the choice text when the choice is MADE, not here.
+                // Here we just finish the round.
+
                 set(state => ({
                     novelSession: state.novelSession ? {
                         ...state.novelSession,
                         currentOptions: options,
                         status: 'selecting_option',
-                        currentRevision: 0
+                        currentRevision: 0,
+                        // Clear the draft content from the store to avoid duplication? 
+                        // No, drafts are history.
+                        // We rely on status change to stop 'streamingContent' in UI.
                     } : null,
                     isGenerating: false
                 }));

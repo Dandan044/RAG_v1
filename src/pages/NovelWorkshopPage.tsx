@@ -19,6 +19,7 @@ const NovelWorkshopPage: React.FC = () => {
 
   // Timer Logic for Selection Phase
   useEffect(() => {
+    // Only run if status is selecting_option AND we haven't already made a choice locally (though submitOption handles state)
     if (novelSession?.status === 'selecting_option') {
         setTimeLeft(60);
         const timer = setInterval(() => {
@@ -26,6 +27,11 @@ const NovelWorkshopPage: React.FC = () => {
                 if (prev <= 1) {
                     clearInterval(timer);
                     // Random selection if time runs out
+                    // IMPORTANT: Check status again inside callback to prevent race conditions if user clicked at last second
+                    // Accessing latest state via store would be safer, but here we rely on effect cleanup.
+                    // If component unmounts or status changes, cleanup runs.
+                    // However, `submitOption` is async.
+                    
                     const options = novelSession.currentOptions || [];
                     if (options.length > 0) {
                         const randomChoice = options[Math.floor(Math.random() * options.length)];
@@ -68,7 +74,10 @@ const NovelWorkshopPage: React.FC = () => {
   // Helper to determine what to show in the "Final Story" view
   // If revising, we append the streaming revision draft to the compiled story for a seamless effect.
   const isRevising = novelSession.status === 'revising';
-  const streamingContent = isRevising && currentDraft && currentDraft.round === novelSession.currentRound ? currentDraft.content : '';
+  // IMPORTANT: If status is 'selecting_option', it means revision is DONE and merged into compiledStory.
+  // We should NOT show streamingContent in that case to avoid duplication.
+  const showStreaming = isRevising && currentDraft && currentDraft.round === novelSession.currentRound;
+  const streamingContent = showStreaming ? currentDraft.content : '';
   const displayedStory = novelSession.compiledStory + (streamingContent ? '\n\n' + streamingContent : '');
 
   // Prepare data for ExpertsCircle
@@ -187,8 +196,23 @@ const NovelWorkshopPage: React.FC = () => {
               <div className="flex-1 overflow-y-auto p-8 font-serif leading-relaxed text-lg text-slate-300 space-y-6 scroll-smooth">
               {displayedStory ? (
                   <div className="prose prose-invert max-w-none pb-20">
-                      <ReactMarkdown>{displayedStory}</ReactMarkdown>
-                      {isRevising && (
+                      <ReactMarkdown 
+                        components={{
+                            blockquote: ({node, ...props}) => (
+                                <blockquote className="border-l-4 border-emerald-500 pl-4 py-2 bg-emerald-900/20 rounded-r my-6 italic text-emerald-100" {...props} />
+                            ),
+                            hr: ({node, ...props}) => (
+                                <div className="flex items-center justify-center my-8 gap-2 opacity-50">
+                                    <div className="h-px bg-slate-700 w-12" />
+                                    <div className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+                                    <div className="h-px bg-slate-700 w-12" />
+                                </div>
+                            )
+                        }}
+                      >
+                        {displayedStory}
+                      </ReactMarkdown>
+                      {showStreaming && (
                          <span className="inline-block w-2 h-5 bg-emerald-500 ml-1 animate-pulse align-middle" />
                       )}
                   </div>

@@ -569,14 +569,13 @@ export const generateNovelSegment = async (
     const config = useAgentConfigStore.getState().getConfig('novel_writer');
 
     // Process variables for prompt
-    const totalSegmentMsg = segmentIndex < 3 ? '（共3部分）' : '';
     const worldviewMsg = worldview ? `【世界观设定】（必须严格遵守）：\n${worldview}\n` : '';
     const outlineMsg = outline ? `【当前阶段大纲】（必须严格执行）：\n${outline}\n` : '';
     const outlineStageMsg = outlineStage ? `【大纲进度】：这是当前大纲阶段的第 ${outlineStage} 次写作。请把控好剧情节奏，稳步推进剧情。\n` : '';
 
     const systemPrompt = processTemplate(config.systemPrompt, {
         segmentIndex: segmentIndex + 1,
-        totalSegmentMsg,
+        totalSegmentMsg: '',
         worldview: worldviewMsg,
         outline: outlineMsg,
         outlineStageMsg,
