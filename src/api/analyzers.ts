@@ -4,8 +4,8 @@ import { useDebugStore } from '@/store/debugStore';
 import { v4 as uuidv4 } from 'uuid';
 import { memoryStore } from '@/lib/vectorStore';
 
-type CharacterUpdate = Partial<CharacterProfile> & { id?: string; name?: string };
-type TaskUpdate = Partial<StoryTask> & { id?: string; title?: string };
+export type CharacterUpdate = Partial<CharacterProfile> & { id?: string; name?: string };
+export type TaskUpdate = Partial<StoryTask> & { id?: string; title?: string };
 
 const isAbortError = (error: unknown): boolean =>
     typeof error === 'object' && error !== null && 'name' in error && (error as { name?: unknown }).name === 'AbortError';
@@ -48,7 +48,10 @@ const buildCharacterProfile = (update: CharacterUpdate, id: string, currentRound
         location: update.location ?? '',
         relationships: update.relationships ?? '',
         tags: update.tags ?? [],
-        lastUpdatedRound: currentRound
+        lastUpdatedRound: currentRound,
+        isProtagonist: update.isProtagonist ?? false,
+        bodyStatus: update.bodyStatus ?? {},
+        inventory: update.inventory ?? []
     };
 };
 
@@ -70,7 +73,21 @@ const buildStoryTask = (update: TaskUpdate, id: string, currentRound: number): S
 
 // Helper to update vector store
 const updateCharacterVector = async (character: CharacterProfile, round: number) => {
-    const text = `姓名：${character.name}\nID：${character.id}\n描述：${character.description}\n状态：${character.status}\n位置：${character.location}\n关系：${character.relationships}\n标签：${character.tags.join(', ')}`;
+    let text = `姓名：${character.name}\nID：${character.id}\n描述：${character.description}\n状态：${character.status}\n位置：${character.location}\n关系：${character.relationships}\n标签：${character.tags.join(', ')}`;
+    
+    if (character.isProtagonist) {
+        text += `\n【主角】`;
+        if (character.bodyStatus && Object.keys(character.bodyStatus).length > 0) {
+             text += `\n身体状态：`;
+             Object.values(character.bodyStatus).forEach(part => {
+                 text += `\n- ${part.name}: ${part.status} (${part.severity}) - ${part.description || ''}`;
+             });
+        }
+        if (character.inventory && character.inventory.length > 0) {
+            text += `\n物品栏：${character.inventory.join(', ')}`;
+        }
+    }
+
     await memoryStore.updateEntityDocument(character.id, text, {
         round,
         type: 'character_profile'
@@ -129,7 +146,11 @@ export const analyzeCharacters = async (
                     relevantDocs.push(doc.text);
                 } else {
                     // Fallback to constructing from current profile
-                    relevantDocs.push(`姓名：${char.name} (ID: ${char.id})\n描述：${char.description}\n状态：${char.status}\n位置：${char.location}`);
+                    let info = `姓名：${char.name} (ID: ${char.id})\n描述：${char.description}\n状态：${char.status}\n位置：${char.location}`;
+                    if (char.isProtagonist && char.bodyStatus) {
+                         info += `\n身体状态：${Object.values(char.bodyStatus).map(p => `${p.name}: ${p.status}`).join(', ')}`;
+                    }
+                    relevantDocs.push(info);
                 }
             }
         });
@@ -189,18 +210,50 @@ export const analyzeCharacters = async (
                 // Update existing
                 const index = newCharacters.findIndex(c => c.id === charUpdate.id);
                 if (index !== -1) {
-                    newCharacters[index] = {
-                        ...mergeDefined(newCharacters[index], charUpdate),
-                        lastUpdatedRound: currentRound
-                    };
-                    updatedChar = newCharacters[index];
+                    const merged = mergeDefined(newCharacters[index], charUpdate);
+        
+        // Defensive merging for critical arrays/objects to prevent accidental deletion if model returns undefined/empty
+        // However, if model explicitly returns empty array [], it might mean clear inventory?
+        // But prompt says "output full state". 
+        // Let's assume:
+        // - undefined/null -> keep old
+        // - empty object/array -> keep old (Defensive) UNLESS we want to allow clearing.
+        // Given the prompt instruction "strict persistence", model should return empty only if it means empty.
+        // But to be safe against "forgot to mention" -> we might merge?
+        // No, merging arrays (old + new) might duplicate if model returns full list.
+        // So we stick to: if provided (length > 0 or keys > 0), use new. If empty/undefined, keep old.
+        // This prevents accidental clearing. If user REALLY wants to clear, model needs to output explicit "empty" marker? 
+        // For now, simple defensive:
+        
+        if (charUpdate.inventory === undefined) {
+             merged.inventory = newCharacters[index].inventory;
+        }
+        
+        if (charUpdate.bodyStatus === undefined) {
+             merged.bodyStatus = newCharacters[index].bodyStatus;
+        }
+
+        newCharacters[index] = {
+            ...merged,
+            lastUpdatedRound: currentRound
+        };
+        updatedChar = newCharacters[index];
                 }
             } else {
                 // Try to find by name if ID missing
                 const index = newCharacters.findIndex(c => c.name === charUpdate.name);
                 if (index !== -1) {
+                    const merged = mergeDefined(newCharacters[index], charUpdate);
+                    
+                    if (charUpdate.inventory === undefined) {
+                        merged.inventory = newCharacters[index].inventory;
+                    }
+                    if (charUpdate.bodyStatus === undefined) {
+                        merged.bodyStatus = newCharacters[index].bodyStatus;
+                    }
+
                     newCharacters[index] = {
-                        ...mergeDefined(newCharacters[index], charUpdate),
+                        ...merged,
                         lastUpdatedRound: currentRound
                     };
                     updatedChar = newCharacters[index];

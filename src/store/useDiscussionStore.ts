@@ -596,6 +596,9 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
         const userChoiceObj = novelSession.choiceHistory.find(c => c.round === novelSession.currentRound - 1);
         const userChoice = userChoiceObj ? userChoiceObj.choice : undefined;
 
+        // Retrieve protagonist profile
+        const protagonist = novelSession.characters.find(c => c.isProtagonist);
+
         // Consecutive requests
         for (let i = 0; i < segmentCount; i++) {
             let segmentContent = '';
@@ -674,6 +677,7 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                 currentOutline, // Pass outline
                 roundsInCurrentOutline, // Pass roundsInCurrentOutline
                 userChoice, // Pass userChoice
+                protagonist, // Pass protagonist profile
                 signal
             );
             
@@ -756,6 +760,9 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
             const userChoiceObj = novelSession.choiceHistory.find(c => c.round === novelSession.currentRound - 1);
             const userChoice = userChoiceObj ? userChoiceObj.choice : undefined;
 
+            // Retrieve protagonist profile
+            const protagonist = novelSession.characters.find(c => c.isProtagonist);
+
             // Create placeholders for critiques
             const critiquePromises = novelSession.experts.map(async (expert) => {
                 const critiqueId = uuidv4();
@@ -799,6 +806,7 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                     roundsInCurrentOutline, // outlineStage
                     novelSession.currentRound, // currentRound
                     userChoice,
+                    protagonist, // Pass protagonist profile
                     signal
                 );
                 return { expertName: expert.name, content: result.content };
@@ -978,16 +986,47 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                 console.error("Failed to initiate archive:", e);
             }
 
-            // 1.5. Trigger Analyzers (Characters & Tasks)
-            // Run in background, don't block the UI transition but update store when done
+            // 1.5. Trigger Analyzers (Characters & Tasks) & Option Generation
+            // Run concurrently but WAIT for them before proceeding to ensure state consistency.
             const currentRoundForAnalyzer = novelSession.currentRound;
             const currentCharacters = novelSession.characters || [];
             const currentTasks = novelSession.tasks || [];
             
-            // We use the same signal or a new one? Analyzer shouldn't be strictly aborted if revision is done, 
-            // but let's stick to the controller for now.
-            
-            Promise.all([
+            // Parallel execution: Analyze State AND Generate Options
+            const [analysisResult, options] = await Promise.all([
+                // Analysis Task
+                Promise.all([
+                    analyzeCharacters(finalizedText, currentCharacters, currentRoundForAnalyzer, signal),
+                    analyzeTasks(finalizedText, currentTasks, currentRoundForAnalyzer, signal)
+                ]).then(([updatedChars, updatedTasks]) => {
+                    // Update store immediately with analysis results
+                    set(state => {
+                        if (!state.novelSession) return {};
+                        return {
+                            novelSession: {
+                                ...state.novelSession,
+                                characters: updatedChars,
+                                tasks: updatedTasks
+                            }
+                        };
+                    });
+                    return true; // Signal completion
+                }),
+
+                // Option Generation Task
+                // Only generate if we are not done with revisions (which is checked below, but we can pre-generate?)
+                // Actually, option generation should only happen if we are COMPLETE with revisions.
+                // But the original logic was: Check revision completion -> if done -> generate options.
+                // Let's stick to the flow but synchronize analysis.
+                // Wait, if we are NOT done with revisions, we don't need options.
+                // So we should separate them.
+                
+                // Let's just await analysis first.
+            ]);
+
+            // Re-structure:
+            // 1. Await Analysis
+            await Promise.all([
                 analyzeCharacters(finalizedText, currentCharacters, currentRoundForAnalyzer, signal),
                 analyzeTasks(finalizedText, currentTasks, currentRoundForAnalyzer, signal)
             ]).then(([updatedChars, updatedTasks]) => {
@@ -1006,7 +1045,7 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                 console.error("Analyzer error:", err);
             });
 
-
+            // 2. Check Revision Status & Proceed
             set(state => {
                 if (!state.novelSession) return {};
                 
@@ -1014,28 +1053,13 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
                 const isRevisionComplete = currentRevision >= state.novelSession.maxRevisions;
 
                 if (isRevisionComplete) {
-                    // Will handle option generation outside
                     return {
                          novelSession: {
                             ...state.novelSession,
-                            // DO NOT append to compiledStory here if we are already streaming it in UI.
-                            // But we need to persist it.
-                            // The issue is: The UI appends streamingContent to compiledStory for display.
-                            // If we append here, the UI will see (compiledStory + finalized) + (streamingContent which is finalized) -> Duplicate?
-                            // No, once status changes from 'revising', streamingContent becomes empty.
-                            // So appending here is correct for persistence.
-                            // The user says "定稿视图中会存在两次相同的定稿内容".
-                            // This might be because the UI renders `novelSession.compiledStory` AND `streamingContent`.
-                            // If `compiledStory` is updated BEFORE status changes away from 'revising', we get double render.
-                            // But here we update compiledStory AND status (implicitly, or in next tick?)
-                            // Actually, we DO NOT change status here immediately to something else than revising/critiquing?
-                            // Ah, below we set status to 'selecting_option' or 'critiquing'.
-                            
                             compiledStory: (state.novelSession.compiledStory || '') + '\n\n' + finalizedText,
                         }
                     };
                 } else {
-                    // CYCLE NOT COMPLETE -> Go back to Critiquing for next revision round
                     return {
                         novelSession: {
                             ...state.novelSession,
@@ -1049,31 +1073,24 @@ export const useDiscussionStore = create<DiscussionState>((set, get) => ({
 
             // Check if we need to generate options (Revision Complete)
             const { novelSession: checkedSession } = get();
+            
+            // If we are still 'revising' (status hasn't changed to 'critiquing'), it means we completed the cycle.
+            // But wait, the set() above for completion case didn't change status. 
+            // It just updated compiledStory. So status is still 'revising'.
+            
+            // Logic check:
+            // If we returned { status: 'critiquing' } above, checkedSession.status is 'critiquing'.
+            // If we returned { compiledStory: ... } above, checkedSession.status is 'revising'.
+            
             if (checkedSession && checkedSession.status === 'revising') { 
-                // If status is still revising, it means we just finished the revision loop but didn't change status yet in the block above for completion case?
-                // Wait, in the block above:
-                // If complete: I only updated compiledStory. Status is technically still 'revising' from previous state? No, I didn't update status.
-                // So yes, status is 'revising'.
-                
-                // Let's double check logic.
-                // Ideally I should update status to 'selecting_option' only after options are ready.
-                
                 const options = await generateOptions(finalizedText, signal);
                 
-                // Add separator and user choice marker to compiled story if needed, or handle in UI?
-                // User wants: "将玩家做出的选择文本，也追加到定稿视图中，要在显示中区分"
-                // We should append the choice text when the choice is MADE, not here.
-                // Here we just finish the round.
-
                 set(state => ({
                     novelSession: state.novelSession ? {
                         ...state.novelSession,
                         currentOptions: options,
                         status: 'selecting_option',
                         currentRevision: 0,
-                        // Clear the draft content from the store to avoid duplication? 
-                        // No, drafts are history.
-                        // We rely on status change to stop 'streamingContent' in UI.
                     } : null,
                     isGenerating: false
                 }));

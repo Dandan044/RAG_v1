@@ -68,7 +68,24 @@ const server = http.createServer((req, res) => {
     }
 });
 
-const PORT = 3001;
-server.listen(PORT, () => {
-    console.log(`Archive server running on http://localhost:${PORT}`);
+const DEFAULT_PORT = 3001;
+const startPortRaw = process.env.ARCHIVE_PORT ?? process.env.PORT;
+const startPortParsed = startPortRaw ? Number.parseInt(startPortRaw, 10) : DEFAULT_PORT;
+const startPort = Number.isFinite(startPortParsed) ? startPortParsed : DEFAULT_PORT;
+const maxAttempts = 10;
+
+let currentPort = startPort;
+const handleError = (err) => {
+    if (err?.code === 'EADDRINUSE' && currentPort < startPort + maxAttempts - 1) {
+        currentPort += 1;
+        server.listen(currentPort);
+        return;
+    }
+    throw err;
+};
+
+server.on('error', handleError);
+server.listen(currentPort, () => {
+    server.off('error', handleError);
+    console.log(`Archive server running on http://localhost:${currentPort}`);
 });

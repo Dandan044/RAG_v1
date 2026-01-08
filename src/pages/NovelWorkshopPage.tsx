@@ -1,17 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDiscussionStore } from '@/store/useDiscussionStore';
-import { ArrowLeft, Edit3, MessageSquare, FileText, CheckCircle, RefreshCw, Brain, Activity, LayoutTemplate } from 'lucide-react';
+import { ArrowLeft, Edit3, MessageSquare, FileText, CheckCircle, RefreshCw, Brain, Activity, LayoutTemplate, ChevronLeft, ChevronRight, Users, User, Backpack } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import ExpertCard from '@/components/ExpertCard';
 import DebugDashboard from '@/components/DebugDashboard';
 import { StoryStateDashboard } from '@/components/StoryStateDashboard';
+import BodyStatusView from '@/components/BodyStatusView';
 
 const NovelWorkshopPage: React.FC = () => {
   const navigate = useNavigate();
   const { novelSession, startNovelWorkflow, stopNovel, isGenerating, currentSpeakerId, submitOption } = useDiscussionStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [isDraftsCollapsed, setIsDraftsCollapsed] = useState(true);
+  const [activePanel, setActivePanel] = useState<'none' | 'experts' | 'body'>('none');
   const [isDebugOpen, setIsDebugOpen] = useState(false);
   const [isStateOpen, setIsStateOpen] = useState(false);
   const [timeLeft, setTimeLeft] = useState(60);
@@ -84,6 +86,8 @@ const NovelWorkshopPage: React.FC = () => {
   const allParticipants = novelSession.moderator 
     ? [...novelSession.experts, novelSession.moderator]
     : novelSession.experts;
+
+  const protagonist = novelSession.characters.find(c => c.isProtagonist);
 
   const activeExpertIds = novelSession.status === 'critiquing' 
     ? novelSession.experts.map(e => e.id) 
@@ -198,10 +202,10 @@ const NovelWorkshopPage: React.FC = () => {
                   <div className="prose prose-invert max-w-none pb-20">
                       <ReactMarkdown 
                         components={{
-                            blockquote: ({node, ...props}) => (
+                            blockquote: (props) => (
                                 <blockquote className="border-l-4 border-emerald-500 pl-4 py-2 bg-emerald-900/20 rounded-r my-6 italic text-emerald-100" {...props} />
                             ),
-                            hr: ({node, ...props}) => (
+                            hr: () => (
                                 <div className="flex items-center justify-center my-8 gap-2 opacity-50">
                                     <div className="h-px bg-slate-700 w-12" />
                                     <div className="w-1.5 h-1.5 rounded-full bg-slate-500" />
@@ -403,89 +407,167 @@ const NovelWorkshopPage: React.FC = () => {
 
         </div>
 
+        {/* Floating Toggle Buttons */}
+        <div className={`absolute top-24 z-50 flex flex-col gap-2 transition-all duration-300 ${
+            activePanel !== 'none' ? 'right-[450px]' : 'right-0'
+        }`}>
+            {/* Body View Toggle */}
+            <button
+                onClick={() => setActivePanel(activePanel === 'body' ? 'none' : 'body')}
+                className={`p-3 rounded-l-xl shadow-xl border-y border-l transition-all ${
+                    activePanel === 'body' 
+                        ? 'bg-emerald-900/80 border-emerald-700 text-emerald-400 translate-x-0' 
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-emerald-400 hover:bg-slate-800 translate-x-1 hover:translate-x-0'
+                }`}
+                title="主角状态"
+            >
+                <Activity className="w-5 h-5" />
+            </button>
+
+            {/* Expert View Toggle */}
+            <button
+                onClick={() => setActivePanel(activePanel === 'experts' ? 'none' : 'experts')}
+                className={`p-3 rounded-l-xl shadow-xl border-y border-l transition-all ${
+                    activePanel === 'experts' 
+                        ? 'bg-blue-900/80 border-blue-700 text-blue-400 translate-x-0' 
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-blue-400 hover:bg-slate-800 translate-x-1 hover:translate-x-0'
+                }`}
+                title="专家评审团"
+            >
+                <Users className="w-5 h-5" />
+            </button>
+        </div>
+
         {/* Right Panel: Workflow & Critique */}
-        <div className="w-[450px] flex flex-col bg-slate-950 border-l border-slate-800 relative shadow-2xl z-10">
+        <div className={`flex flex-col bg-slate-950 border-l border-slate-800 relative shadow-2xl z-10 transition-all duration-300 ease-in-out ${
+            activePanel !== 'none' ? 'w-[450px]' : 'w-0 border-l-0'
+        }`}>
+          <div className="w-[450px] flex flex-col h-full overflow-hidden">
           
-          {/* Status Indicator */}
-          <div className="p-4 border-b border-slate-800 bg-slate-900 z-10">
-             <div className="flex justify-between items-center mb-4">
-               <h3 className="font-semibold text-slate-200">工作流进度</h3>
-             </div>
-             <div className="flex justify-between items-center relative">
-                {/* Progress Line */}
-                <div className="absolute left-0 top-1/2 w-full h-0.5 bg-slate-800 -z-10" />
-                
-                {['drafting', 'critiquing', 'summarizing', 'revising'].map((step, idx) => {
-                   const isActive = novelSession.status === step;
-                   const isPast = ['drafting', 'critiquing', 'summarizing', 'revising', 'completed'].indexOf(novelSession.status) > idx;
-                   
-                   let icon = <Edit3 className="w-3 h-3" />;
-                   if (step === 'critiquing') icon = <MessageSquare className="w-3 h-3" />;
-                   if (step === 'summarizing') icon = <CheckCircle className="w-3 h-3" />;
-                   if (step === 'revising') icon = <RefreshCw className="w-3 h-3" />;
-
-                   return (
-                     <div key={step} className={`flex flex-col items-center gap-2 ${isActive ? 'scale-110' : ''} transition-all`}>
-                       <div className={`w-8 h-8 rounded-full flex items-center justify-center border-2 ${
-                         isActive ? 'bg-emerald-600 border-emerald-400 text-white shadow-lg shadow-emerald-500/20' :
-                         isPast ? 'bg-slate-800 border-emerald-800 text-emerald-500' :
-                         'bg-slate-900 border-slate-700 text-slate-600'
-                       }`}>
-                         {icon}
-                       </div>
-                       <span className="text-[10px] uppercase font-bold text-slate-500">{step}</span>
-                     </div>
-                   );
-                })}
-             </div>
+          {/* Panel Header */}
+          <div className="p-4 border-b border-slate-800 bg-slate-900 z-10 flex justify-between items-center">
+             <h3 className="font-semibold text-slate-200 flex items-center gap-2">
+                {activePanel === 'body' ? (
+                    <>
+                        <User className="w-4 h-4 text-emerald-400" />
+                        主角状态监控
+                    </>
+                ) : (
+                    <>
+                        <Users className="w-4 h-4 text-blue-400" />
+                        专家评审团
+                    </>
+                )}
+             </h3>
+             <button onClick={() => setActivePanel('none')} className="text-slate-500 hover:text-white">
+                 <ChevronRight className="w-4 h-4" />
+             </button>
           </div>
 
-          {/* Expert Cards List */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-950 custom-scrollbar">
-             <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 px-1">
-                专家评审团 ({allParticipants.length})
-             </div>
-             
-             {allParticipants.map(expert => {
-                const isActive = activeExpertIds.includes(expert.id);
-                const contentData = expertContentMap[expert.id];
-                
-                return (
-                   <ExpertCard 
-                      key={expert.id}
-                      expert={expert}
-                      isActive={isActive}
-                      content={contentData?.content}
-                      thinking={contentData?.thinking}
-                   />
-                );
-             })}
-             
-             {/* Status overlay for non-active phases */}
-             {(novelSession.status === 'drafting' || novelSession.status === 'revising' || novelSession.status === 'outline_discussion') && (
-                <div className="mt-8 text-center p-6 border-2 border-dashed border-slate-800 rounded-xl bg-slate-900/30">
-                   <div className="animate-pulse flex flex-col items-center gap-3">
-                      {novelSession.status === 'drafting' ? (
-                         <>
-                            <Edit3 className="w-8 h-8 text-slate-600" />
-                            <span className="text-sm text-slate-500">正在创作新章节...</span>
-                         </>
-                      ) : novelSession.status === 'outline_discussion' ? (
-                         <>
-                            <LayoutTemplate className="w-8 h-8 text-slate-600" />
-                            <span className="text-sm text-slate-500">专家团正在研讨剧情大纲...</span>
-                         </>
-                      ) : (
-                         <>
-                            <RefreshCw className="w-8 h-8 text-slate-600" />
-                            <span className="text-sm text-slate-500">正在修订文稿...</span>
-                         </>
-                      )}
-                   </div>
+          {/* Workflow Progress (Always Visible in Expert View, maybe hidden in Body view? Or kept for context?) */}
+          {/* User request: "human body view and expert view should not be in the same view". 
+              So if body view is active, we show body. If expert view is active, we show experts + workflow? 
+              Workflow is usually associated with experts. Let's keep workflow in Expert Panel only for now, or both?
+              Let's put it in Expert Panel as it was.
+          */}
+          
+          {activePanel === 'experts' && (
+            <div className="p-4 border-b border-slate-800 bg-slate-900/50">
+                <div className="flex justify-between items-center relative">
+                    {/* Progress Line */}
+                    <div className="absolute left-0 top-1/2 w-full h-0.5 bg-slate-800 -z-10" />
+                    
+                    {['drafting', 'critiquing', 'summarizing', 'revising'].map((step, idx) => {
+                    const isActive = novelSession.status === step;
+                    const isPast = ['drafting', 'critiquing', 'summarizing', 'revising', 'completed'].indexOf(novelSession.status) > idx;
+                    
+                    let icon = <Edit3 className="w-3 h-3" />;
+                    if (step === 'critiquing') icon = <MessageSquare className="w-3 h-3" />;
+                    if (step === 'summarizing') icon = <CheckCircle className="w-3 h-3" />;
+                    if (step === 'revising') icon = <RefreshCw className="w-3 h-3" />;
+
+                    return (
+                        <div key={step} className={`flex flex-col items-center gap-2 ${isActive ? 'scale-110' : ''} transition-all`}>
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center border-2 ${
+                            isActive ? 'bg-emerald-600 border-emerald-400 text-white shadow-lg shadow-emerald-500/20' :
+                            isPast ? 'bg-slate-800 border-emerald-800 text-emerald-500' :
+                            'bg-slate-900 border-slate-700 text-slate-600'
+                        }`}>
+                            {icon}
+                        </div>
+                        <span className="text-[10px] uppercase font-bold text-slate-500">{step}</span>
+                        </div>
+                    );
+                    })}
                 </div>
-             )}
-          </div>
+            </div>
+          )}
+          
+          {/* Content Area */}
+          <div className="flex-1 overflow-y-auto bg-slate-950 custom-scrollbar">
+              
+              {/* BODY VIEW CONTENT */}
+              {activePanel === 'body' && (
+                  <div className="p-6">
+                      {protagonist ? (
+                          <BodyStatusView character={protagonist} />
+                      ) : (
+                          <div className="text-center text-slate-500 mt-10">
+                              <p>暂无主角数据</p>
+                          </div>
+                      )}
+                  </div>
+              )}
 
+              {/* EXPERT VIEW CONTENT */}
+              {activePanel === 'experts' && (
+                  <div className="p-4 space-y-4">
+                        <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 px-1">
+                            专家团 ({allParticipants.length})
+                        </div>
+                        
+                        {allParticipants.map(expert => {
+                            const isActive = activeExpertIds.includes(expert.id);
+                            const contentData = expertContentMap[expert.id];
+                            
+                            return (
+                            <ExpertCard 
+                                key={expert.id}
+                                expert={expert}
+                                isActive={isActive}
+                                content={contentData?.content}
+                                thinking={contentData?.thinking}
+                            />
+                            );
+                        })}
+                        
+                        {/* Status overlay for non-active phases */}
+                        {(novelSession.status === 'drafting' || novelSession.status === 'revising' || novelSession.status === 'outline_discussion') && (
+                            <div className="mt-8 text-center p-6 border-2 border-dashed border-slate-800 rounded-xl bg-slate-900/30">
+                            <div className="animate-pulse flex flex-col items-center gap-3">
+                                {novelSession.status === 'drafting' ? (
+                                    <>
+                                        <Edit3 className="w-8 h-8 text-slate-600" />
+                                        <span className="text-sm text-slate-500">正在创作新章节...</span>
+                                    </>
+                                ) : novelSession.status === 'outline_discussion' ? (
+                                    <>
+                                        <LayoutTemplate className="w-8 h-8 text-slate-600" />
+                                        <span className="text-sm text-slate-500">专家团正在研讨剧情大纲...</span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <RefreshCw className="w-8 h-8 text-slate-600" />
+                                        <span className="text-sm text-slate-500">正在修订文稿...</span>
+                                    </>
+                                )}
+                            </div>
+                            </div>
+                        )}
+                  </div>
+              )}
+          </div>
+          </div>
         </div>
       </main>
     </div>

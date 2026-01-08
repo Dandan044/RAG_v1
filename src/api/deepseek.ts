@@ -1,7 +1,7 @@
 import { deepseekClient } from '@/lib/axios';
-import { Expert, DiscussionMessage } from '@/types';
-import { v4 as uuidv4 } from 'uuid';
-import { memoryStore } from '@/lib/vectorStore';
+  import { Expert, DiscussionMessage, CharacterProfile } from '@/types';
+  import { v4 as uuidv4 } from 'uuid';
+  import { memoryStore } from '@/lib/vectorStore';
 import { useDebugStore } from '@/store/debugStore';
 import { useAgentConfigStore } from '@/store/agentConfigStore';
 
@@ -562,6 +562,7 @@ export const generateNovelSegment = async (
   outline?: string,
   outlineStage?: number, // New: Stage of outline (1-5)
   userChoice?: string,
+  protagonistProfile?: CharacterProfile,
   signal?: AbortSignal
 ): Promise<{ content: string; thinking: string }> => {
   try {
@@ -572,6 +573,23 @@ export const generateNovelSegment = async (
     const worldviewMsg = worldview ? `【世界观设定】（必须严格遵守）：\n${worldview}\n` : '';
     const outlineMsg = outline ? `【当前阶段大纲】（必须严格执行）：\n${outline}\n` : '';
     const outlineStageMsg = outlineStage ? `【大纲进度】：这是当前大纲阶段的第 ${outlineStage} 次写作。请把控好剧情节奏，稳步推进剧情。\n` : '';
+    
+    // Process protagonist status
+    let protagonistMsg = '';
+    if (protagonistProfile) {
+        protagonistMsg = `【主角状态】（必须遵守）：\n`;
+        if (protagonistProfile.bodyStatus && Object.keys(protagonistProfile.bodyStatus).length > 0) {
+            protagonistMsg += `- 身体状况：${Object.values(protagonistProfile.bodyStatus).map(p => `${p.name}: ${p.status} (${p.severity})`).join('; ')}\n`;
+        } else {
+            protagonistMsg += `- 身体状况：良好\n`;
+        }
+        
+        if (protagonistProfile.inventory && protagonistProfile.inventory.length > 0) {
+            protagonistMsg += `- 物品栏（只能使用以下物品）：${protagonistProfile.inventory.join(', ')}\n`;
+        } else {
+            protagonistMsg += `- 物品栏：空（不可凭空使用物品）\n`;
+        }
+    }
 
     const systemPrompt = processTemplate(config.systemPrompt, {
         segmentIndex: segmentIndex + 1,
@@ -579,7 +597,8 @@ export const generateNovelSegment = async (
         worldview: worldviewMsg,
         outline: outlineMsg,
         outlineStageMsg,
-        userChoice: userChoice || "无（起始章节）"
+        userChoice: userChoice || "无（起始章节）",
+        protagonistStatus: protagonistMsg
     });
 
     const requestBody: ChatRequest = {
@@ -649,6 +668,7 @@ export const generateExpertCritique = async (
   outlineStage?: number,
   currentRound?: number,
   userChoice?: string,
+  protagonistProfile?: CharacterProfile,
   signal?: AbortSignal
 ): Promise<{ content: string; thinking: string }> => {
   try {
@@ -663,6 +683,23 @@ export const generateExpertCritique = async (
     const outlineMsg = outline ? `同时请检查剧情走向是否符合【当前阶段大纲】：\n${outline}` : '';
     const outlineStageMsg = outlineStage ? `【大纲进度】：这是当前大纲阶段的第 ${outlineStage} 次写作。` : '';
     
+    // Process protagonist status
+    let protagonistMsg = '';
+    if (protagonistProfile) {
+        protagonistMsg = `【主角状态】：\n`;
+        if (protagonistProfile.bodyStatus && Object.keys(protagonistProfile.bodyStatus).length > 0) {
+            protagonistMsg += `- 身体状况：${Object.values(protagonistProfile.bodyStatus).map(p => `${p.name}: ${p.status} (${p.severity})`).join('; ')}\n`;
+        } else {
+            protagonistMsg += `- 身体状况：良好\n`;
+        }
+        
+        if (protagonistProfile.inventory && protagonistProfile.inventory.length > 0) {
+            protagonistMsg += `- 物品栏：${protagonistProfile.inventory.join(', ')}\n`;
+        } else {
+            protagonistMsg += `- 物品栏：空\n`;
+        }
+    }
+
     const thinkingInstruction = enableThinking 
             ? `4. **无错即止**：如果发现没有明显的逻辑漏洞或硬伤，请直接回答“无逻辑漏洞，无需修改”。` 
             : `4. **简要分析**：如果未发现明显漏洞，请先简要说明（1-2句）确认了哪些逻辑点（如时间线、因果等）是连贯的，然后总结“无逻辑漏洞，无需修改”。`;
@@ -675,7 +712,8 @@ export const generateExpertCritique = async (
         outline: outlineMsg,
         outlineStageMsg,
         thinkingInstruction,
-        userChoice: userChoice || "无"
+        userChoice: userChoice || "无",
+        protagonistStatus: protagonistMsg
     });
 
     const messages: ChatMessage[] = [

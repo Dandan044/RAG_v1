@@ -76,6 +76,14 @@ export interface Outline {
   content: string;
 }
 
+export interface BodyPartStatus {
+  name: string;
+  status: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  description?: string;
+  lastUpdatedRound: number;
+}
+
 export interface CharacterProfile {
   id: string;
   name: string;
@@ -85,6 +93,9 @@ export interface CharacterProfile {
   relationships: string;
   tags: string[];
   lastUpdatedRound: number;
+  isProtagonist?: boolean;
+  bodyStatus?: Record<string, BodyPartStatus>;
+  inventory?: string[];
 }
 
 export interface StoryTask {
